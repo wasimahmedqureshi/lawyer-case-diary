@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lawyer Case Diary</title>
+  <meta name="theme-color" content="#1e3a5f" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- ============ AUTH SCREEN ============ -->
+  <section id="authScreen" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="brand">⚖️ <span>Lawyer Case Diary</span></div>
+      <p class="muted center">Your private case register, hearing calendar and document vault.</p>
+
+      <div class="tabs">
+        <button id="tabLogin" class="tab active" type="button">Login</button>
+        <button id="tabSignup" class="tab" type="button">Sign up</button>
+      </div>
+
+      <form id="authForm" autocomplete="on">
+        <div id="signupOnly" class="hidden">
+          <label>Advocate name
+            <input id="authName" type="text" placeholder="e.g. Adv. Ramesh Sharma" />
+          </label>
+          <label>Enrolment / Bar Council No. <span class="muted">(optional)</span>
+            <input id="authEnrol" type="text" placeholder="R/1234/2015" />
+          </label>
+        </div>
+        <label>Email
+          <input id="authEmail" type="email" required autocomplete="email" />
+        </label>
+        <label>Password
+          <input id="authPassword" type="password" required minlength="6" autocomplete="current-password" />
+        </label>
+        <button id="authSubmit" class="btn primary block" type="submit">Login</button>
+        <button id="forgotBtn" class="link-btn" type="button">Forgot password?</button>
+        <p id="authError" class="error"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============ APP SCREEN ============ -->
+  <div id="appScreen" class="hidden">
+    <header class="topbar">
+      <div class="brand small">⚖️ <span>Lawyer Case Diary</span></div>
+      <div class="topbar-right">
+        <span id="advName" class="muted"></span>
+        <button id="logoutBtn" class="btn ghost" type="button">Logout</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="stats">
+        <div class="stat"><div class="num" id="statTotal">0</div><div class="lbl">Total cases</div></div>
+        <div class="stat"><div class="num" id="statPending">0</div><div class="lbl">Pending</div></div>
+        <div class="stat"><div class="num" id="statWeek">0</div><div class="lbl">Hearings in 7 days</div></div>
+        <div class="stat"><div class="num" id="statDisposed">0</div><div class="lbl">Disposed</div></div>
+      </section>
+
+      <section class="toolbar">
+        <input id="searchInput" type="search" placeholder="Search name, case no., khasra, village, court…" />
+        <select id="statusFilter">
+          <option value="all">All status</option>
+          <option value="Pending">Pending</option>
+          <option value="Disposed">Disposed</option>
+        </select>
+        <button id="reportBtn" class="btn" type="button">📄 Hearings PDF</button>
+        <button id="addBtn" class="btn primary" type="button">+ New case</button>
+      </section>
+
+      <section id="caseList" class="case-list"></section>
+      <p id="emptyMsg" class="muted center hidden">No cases found. Click “+ New case” to add your first one.</p>
+    </main>
+  </div>
+
+  <!-- ============ CASE MODAL ============ -->
+  <div id="caseModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2 id="caseModalTitle">New case</h2>
+        <button id="closeCaseModal" class="icon-btn" type="button" aria-label="Close">✕</button>
+      </div>
+      <form id="caseForm">
+        <div class="case-no-box">
+          Case No.: <strong id="caseNoPreview">Will be generated on save</strong>
+        </div>
+
+        <h3>Parties</h3>
+        <div class="grid">
+          <label>Client name
+            <input name="clientName" type="text" />
+          </label>
+          <label>Appellant name *
+            <input name="appellant" type="text" required />
+          </label>
+          <label>Respondent name *
+            <input name="respondent" type="text" required />
+          </label>
+        </div>
+
+        <h3>Case details</h3>
+        <div class="grid">
+          <label>Case type *
+            <input name="caseType" type="text" list="caseTypes" required placeholder="Appeal / Revision / Suit…" />
+            <datalist id="caseTypes">
+              <option value="Appeal"></option>
+              <option value="Revision"></option>
+              <option value="Revenue Suit"></option>
+              <option value="Review"></option>
+              <option value="Reference"></option>
+              <option value="Execution"></option>
+              <option value="Partition"></option>
+              <option value="Demarcation"></option>
+              <option value="Mutation Dispute"></option>
+              <option value="Miscellaneous"></option>
+            </datalist>
+          </label>
+          <label>Legal section *
+            <input name="section" type="text" required placeholder="e.g. Sec. 75 / 250" />
+          </label>
+          <label>Court name *
+            <input name="courtName" type="text" required placeholder="e.g. Assistant Collector (Fast Track), Niwai" />
+          </label>
+        </div>
+
+        <h3>Location</h3>
+        <div class="grid">
+          <label>Division
+            <input name="division" type="text" />
+          </label>
+          <label>District
+            <input name="district" type="text" />
+          </label>
+          <label>Tehsil
+            <input name="tehsil" type="text" />
+          </label>
+          <label>Village
+            <input name="village" type="text" />
+          </label>
+          <label>Khasra number
+            <input name="khasra" type="text" />
+          </label>
+        </div>
+
+        <h3>Hearing &amp; status</h3>
+        <div class="grid">
+          <label>Next hearing date
+            <input name="nextHearing" type="date" />
+          </label>
+          <label>Status
+            <select name="status" id="statusSelect">
+              <option value="Pending">Pending</option>
+              <option value="Disposed">Disposed</option>
+            </select>
+          </label>
+          <label id="disposalWrap" class="hidden">Disposal date
+            <input name="disposalDate" type="date" />
+          </label>
+        </div>
+        <label>Notes / purpose of hearing
+          <textarea name="notes" rows="3"></textarea>
+        </label>
+
+        <h3>Documents</h3>
+        <div id="existingDocs" class="doc-list"></div>
+        <label>Upload documents <span class="muted">(PDF, images, Word — max 10 MB each)</span>
+          <input id="fileInput" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt" />
+        </label>
+        <div id="uploadProgress" class="progress hidden"><div id="uploadBar"></div></div>
+
+        <p id="caseError" class="error"></p>
+        <div class="modal-actions">
+          <button id="cancelCase" class="btn ghost" type="button">Cancel</button>
+          <button id="saveCase" class="btn primary" type="submit">Save case</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============ REPORT MODAL ============ -->
+  <div id="reportModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-box small-box">
+      <div class="modal-head">
+        <h2>Upcoming hearings report</h2>
+        <button id="closeReportModal" class="icon-btn" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="grid">
+        <label>From date
+          <input id="repFrom" type="date" />
+        </label>
+        <label>To date
+          <input id="repTo" type="date" />
+        </label>
+      </div>
+      <p class="muted">Only pending cases with a hearing date in this range are included, grouped date-wise.</p>
+      <p id="reportError" class="error"></p>
+      <div class="modal-actions">
+        <button id="cancelReport" class="btn ghost" type="button">Cancel</button>
+        <button id="makePdf" class="btn primary" type="button">Download PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- PDF library (renders Hindi / Urdu text correctly via the browser) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
