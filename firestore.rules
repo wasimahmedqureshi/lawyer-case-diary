@@ -1,0 +1,71 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    function acct() {
+      return get(/databases/$(database)/documents/advocates/$(request.auth.uid)).data;
+    }
+
+    // Write access = paid subscription still running OR 60-day free trial still running.
+    // (If you change the trial length, change 60 here and TRIAL_DAYS in js/config.js)
+    function hasAccess() {
+      return ('subscribedUntil' in acct() && acct().subscribedUntil > request.time)
+          || ('trialStart' in acct() && acct().trialStart + duration.value(60, 'd') > request.time);
+    }
+
+    // ---------------- cases ----------------
+    match /cases/{caseId} {
+      allow read: if signedIn() && resource.data.advocateId == request.auth.uid;
+      allow create: if signedIn()
+                    && request.resource.data.advocateId == request.auth.uid
+                    && hasAccess();
+      allow update: if signedIn()
+                    && resource.data.advocateId == request.auth.uid
+                    && request.resource.data.advocateId == request.auth.uid
+                    && request.resource.data.caseNumber == resource.data.caseNumber
+                    && hasAccess();
+      allow delete: if signedIn() && resource.data.advocateId == request.auth.uid;
+
+      // Uploaded documents are stored as small text chunks (no Firebase Storage needed)
+      match /chunks/{chunkId} {
+        allow read: if signedIn()
+                    && get(/databases/$(database)/documents/cases/$(caseId)).data.advocateId == request.auth.uid;
+        allow create, update: if signedIn()
+                    && get(/databases/$(database)/documents/cases/$(caseId)).data.advocateId == request.auth.uid
+                    && hasAccess();
+        allow delete: if signedIn()
+                    && get(/databases/$(database)/documents/cases/$(caseId)).data.advocateId == request.auth.uid;
+      }
+    }
+
+    // Case-number counter (one document per advocate)
+    match /counters/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Advocate profile + subscription dates.
+    // Users can NOT set or extend subscribedUntil / trialStart – only you can, in Firebase Console.
+    match /advocates/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+                    && request.resource.data.trialStart == request.time
+                    && !('subscribedUntil' in request.resource.data);
+      allow update: if signedIn() && request.auth.uid == uid && (
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'enrolment', 'email'])
+                    || (!('trialStart' in resource.data)
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['trialStart'])
+                        && request.resource.data.trialStart == request.time)
+                  );
+    }
+
+    // Subscription payment requests (customer creates, you approve in Console)
+    match /orders/{orderId} {
+      allow create: if signedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == 'pending';
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+  }
+}
