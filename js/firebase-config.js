@@ -2,10 +2,9 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import { getStorage } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-storage.js";
 
 // NOTE: These web-app keys are not secret. Your data is protected by
-// firestore.rules and storage.rules (deploy them!), not by hiding this object.
+// firestore.rules (deploy them!), not by hiding this object.
 const firebaseConfig = {
   apiKey: "AIzaSyC2Dx1J4_F_JUeZC_96Hg9yfq4k7aJ2cyg",
   authDomain: "lawyercasediarypro-f13ecd27.firebaseapp.com",
@@ -18,4 +17,3 @@ const firebaseConfig = {
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const storage = getStorage(app);
