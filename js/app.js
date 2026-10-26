@@ -1,29 +1,36 @@
-import { auth, db, storage } from "./firebase-config.js";
+import { auth, db } from "./firebase-config.js";
+import { TRIAL_DAYS, FEATURES, PLANS, PAYMENT } from "./config.js";
 import {
   onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
   signOut, updateProfile, sendPasswordResetEmail
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
-  collection, doc, getDoc, setDoc, updateDoc, deleteDoc, query, where,
+  collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, query, where,
   onSnapshot, runTransaction, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import {
-  ref, uploadBytesResumable, getDownloadURL, deleteObject
-} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-storage.js";
 
-/* ---------------- helpers ---------------- */
+/* =====================================================================
+   helpers
+   ===================================================================== */
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const MAX_FILE = 10 * 1024 * 1024; // 10 MB
+const money = (n) => "₹" + Number(n).toLocaleString("en-IN");
+const DAY = 86400000;
+const MAX_FILE = 5 * 1024 * 1024;     // 5 MB per document
+const CHUNK = 700000;                 // base64 characters per Firestore chunk (< 1 MiB doc limit)
 
-function toast(msg) {
+function toast(msg, ms = 3400) {
   const t = $("toast");
   t.textContent = msg;
   t.classList.remove("hidden");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.add("hidden"), 3200);
+  toast._t = setTimeout(() => t.classList.add("hidden"), ms);
 }
-
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 function todayISO() {
   const d = new Date();
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
@@ -40,9 +47,14 @@ function fmtDate(iso) {
   const [y, m, d] = iso.split("-");
   return `${d}-${m}-${y}`;
 }
+function fmtDateObj(d) {
+  return d ? d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+}
 function fmtLongDate(iso) {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("en-IN", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+  return new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+}
+function daysBetween(aISO, bISO) {
+  return Math.round((new Date(bISO + "T00:00:00") - new Date(aISO + "T00:00:00")) / DAY);
 }
 function authMessage(e) {
   const map = {
@@ -57,22 +69,43 @@ function authMessage(e) {
   return map[e.code] || e.message;
 }
 
-/* ---------------- state ---------------- */
+/* =====================================================================
+   state
+   ===================================================================== */
 let currentUser = null;
 let advocate = { name: "", enrolment: "" };
+let account = { trialStart: null, subscribedUntil: null };
 let cases = [];
-let unsubscribeCases = null;
-let editing = null;          // case being edited (object) or null for new
-let keptDocs = [];           // documents already attached to the case being edited
+let orders = [];
+let editing = null;
+let keptDocs = [];
 let signupMode = false;
+let signupInProgress = false;
+let locked = false;               // true while the trial/plan has expired
+let trialFixRequested = false;
+let cart = null;                  // plan id or null
+let checkoutOpen = false;
+let screen = "splash";
+let unsubCases = null, unsubAccount = null, unsubOrders = null, accessTimer = null;
 
-/* ---------------- auth UI ---------------- */
+const SCREENS = { splash: "splash", auth: "authScreen", plan: "planScreen", app: "appScreen" };
+function showScreen(name) {
+  screen = name;
+  Object.entries(SCREENS).forEach(([k, id]) => $(id).classList.toggle("hidden", k !== name));
+  window.scrollTo(0, 0);
+}
+
+/* =====================================================================
+   authentication
+   ===================================================================== */
 function setAuthMode(signup) {
   signupMode = signup;
   $("tabLogin").classList.toggle("active", !signup);
   $("tabSignup").classList.toggle("active", signup);
   $("signupOnly").classList.toggle("hidden", !signup);
-  $("authSubmit").textContent = signup ? "Create account" : "Login";
+  $("authSubmit").textContent = signup ? `Create account · ${TRIAL_DAYS} days free` : "Login";
+  $("authHeading").textContent = signup ? "Create your account" : "Welcome back";
+  $("authSub").textContent = signup ? `Start your ${TRIAL_DAYS}-day free trial. No card needed.` : "Login to open your case diary.";
   $("authPassword").autocomplete = signup ? "new-password" : "current-password";
   $("authError").textContent = "";
 }
@@ -89,18 +122,25 @@ $("authForm").addEventListener("submit", async (e) => {
     if (signupMode) {
       const name = $("authName").value.trim();
       if (!name) throw { code: "x", message: "Please enter the advocate name." };
+      signupInProgress = true;
       const cred = await createUserWithEmailAndPassword(auth, email, password);
-      await updateProfile(cred.user, { displayName: name });
-      await setDoc(doc(db, "advocates", cred.user.uid), {
-        name, email, enrolment: $("authEnrol").value.trim(), createdAt: serverTimestamp()
-      });
-      advocate = { name, enrolment: $("authEnrol").value.trim() };
+      try {
+        await updateProfile(cred.user, { displayName: name });
+        await setDoc(doc(db, "advocates", cred.user.uid), {
+          name, email, enrolment: $("authEnrol").value.trim(),
+          trialStart: serverTimestamp(), createdAt: serverTimestamp()
+        });
+      } catch (inner) {
+        await signOut(auth);
+        throw inner;
+      }
     } else {
       await signInWithEmailAndPassword(auth, email, password);
     }
   } catch (err) {
     $("authError").textContent = authMessage(err);
   } finally {
+    signupInProgress = false;
     $("authSubmit").disabled = false;
   }
 });
@@ -116,50 +156,330 @@ $("forgotBtn").onclick = async () => {
 };
 
 $("logoutBtn").onclick = () => signOut(auth);
+$("planLogout").onclick = () => signOut(auth);
 
-onAuthStateChanged(auth, async (user) => {
+function stopAll() {
+  [unsubCases, unsubAccount, unsubOrders].forEach((u) => u && u());
+  unsubCases = unsubAccount = unsubOrders = null;
+  clearInterval(accessTimer);
+  accessTimer = null;
+}
+
+onAuthStateChanged(auth, (user) => {
+  stopAll();
   currentUser = user;
-  if (unsubscribeCases) { unsubscribeCases(); unsubscribeCases = null; }
-  if (!user) {
-    cases = [];
-    $("appScreen").classList.add("hidden");
-    $("authScreen").classList.remove("hidden");
+  cases = []; orders = []; cart = null; checkoutOpen = false;
+  locked = false; trialFixRequested = false;
+  account = { trialStart: null, subscribedUntil: null };
+  if (!user) { showScreen("auth"); return; }
+
+  showScreen("splash");
+  const accRef = doc(db, "advocates", user.uid);
+
+  unsubAccount = onSnapshot(accRef, async (snap) => {
+    if (!snap.exists()) {
+      if (signupInProgress) return;               // the sign-up form is creating it right now
+      try {
+        await setDoc(accRef, {
+          name: user.displayName || "", email: user.email || "", enrolment: "",
+          trialStart: serverTimestamp(), createdAt: serverTimestamp()
+        });
+      } catch (err) { console.error(err); toast("Could not create your account profile: " + err.message); }
+      return;
+    }
+    const d = snap.data({ serverTimestamps: "estimate" });
+    if (!d.trialStart) {                          // older account without a trial date
+      if (!trialFixRequested) {
+        trialFixRequested = true;
+        updateDoc(accRef, { trialStart: serverTimestamp() }).catch((e) => console.error(e));
+      }
+      return;
+    }
+    advocate = { name: d.name || user.displayName || user.email, enrolment: d.enrolment || "" };
+    account = {
+      trialStart: d.trialStart.toDate(),
+      subscribedUntil: d.subscribedUntil ? d.subscribedUntil.toDate() : null
+    };
+    applyAccess();
+  }, (err) => {
+    console.error(err);
+    showScreen("auth");
+    $("authError").textContent = "Could not load your account: " + err.message;
+  });
+
+  unsubOrders = onSnapshot(query(collection(db, "orders"), where("uid", "==", user.uid)), (snap) => {
+    orders = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    orders.sort((a, b) => (b.createdAt?.toMillis?.() ?? Date.now()) - (a.createdAt?.toMillis?.() ?? Date.now()));
+    renderOrders();
+  }, () => { /* orders are optional */ });
+
+  accessTimer = setInterval(applyAccess, 60000);
+});
+
+/* =====================================================================
+   trial / subscription state
+   ===================================================================== */
+function accessState() {
+  const now = Date.now();
+  if (account.subscribedUntil && account.subscribedUntil.getTime() > now) {
+    return { status: "paid", daysLeft: Math.ceil((account.subscribedUntil.getTime() - now) / DAY), end: account.subscribedUntil };
+  }
+  const end = new Date(account.trialStart.getTime() + TRIAL_DAYS * DAY);
+  if (now < end.getTime()) return { status: "trial", daysLeft: Math.ceil((end.getTime() - now) / DAY), end };
+  return { status: "expired", daysLeft: 0, end };
+}
+
+function updatePill(st) {
+  const p = $("planPill");
+  p.classList.remove("warn", "ok");
+  const s = st.daysLeft === 1 ? "" : "s";
+  if (st.status === "paid") {
+    p.textContent = `✔ Premium · ${st.daysLeft} day${s} left`;
+    p.classList.add(st.daysLeft <= 7 ? "warn" : "ok");
+  } else {
+    p.textContent = `🎁 Free trial · ${st.daysLeft} day${s} left`;
+    if (st.daysLeft <= 7) p.classList.add("warn");
+  }
+}
+
+function applyAccess() {
+  if (!currentUser || !account.trialStart) return;
+  const st = accessState();
+  $("advName").textContent = advocate.name;
+  $("welcome").textContent = `Welcome, ${advocate.name}`;
+
+  if (st.status === "expired") {
+    if (unsubCases) { unsubCases(); unsubCases = null; }
+    locked = true;
+    openPlans();
     return;
   }
-  $("authScreen").classList.add("hidden");
-  $("appScreen").classList.remove("hidden");
+  updatePill(st);
+  if (locked) {
+    locked = false;
+    showScreen("app");
+    toast("✔ Subscription active. Thank you!");
+  } else if (screen === "splash") {
+    showScreen("app");
+  }
+  if (!unsubCases) startCases();
+  if (screen === "plan") renderPlanHeader();
+}
 
-  try {
-    const snap = await getDoc(doc(db, "advocates", user.uid));
-    if (snap.exists()) advocate = { name: snap.data().name || "", enrolment: snap.data().enrolment || "" };
-  } catch (_) { /* profile is optional */ }
-  if (!advocate.name) advocate.name = user.displayName || user.email;
-  $("advName").textContent = advocate.name;
-
-  const q = query(collection(db, "cases"), where("advocateId", "==", user.uid));
-  unsubscribeCases = onSnapshot(q, (snap) => {
+function startCases() {
+  const q = query(collection(db, "cases"), where("advocateId", "==", currentUser.uid));
+  unsubCases = onSnapshot(q, (snap) => {
     cases = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    // newest first
-    cases.sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+    cases.sort((a, b) => (b.createdAt?.toMillis?.() ?? Date.now()) - (a.createdAt?.toMillis?.() ?? Date.now()));
     render();
   }, (err) => {
     console.error(err);
     toast("Could not load cases: " + err.message);
   });
+}
+
+/* =====================================================================
+   plans · cart · checkout
+   ===================================================================== */
+$("planPill").onclick = () => openPlans();
+$("planBack").onclick = () => { if (!locked) showScreen("app"); };
+
+function openPlans() {
+  showScreen("plan");
+  $("planBack").classList.toggle("hidden", locked);
+  renderPlanHeader();
+  renderPlanGrid();
+  renderCart();
+  renderOrders();
+  const parts = [];
+  if (PAYMENT.supportWhatsApp) parts.push(`<a href="https://wa.me/${esc(PAYMENT.supportWhatsApp)}" target="_blank" rel="noopener">WhatsApp support</a>`);
+  if (PAYMENT.supportEmail) parts.push(`<a href="mailto:${esc(PAYMENT.supportEmail)}">${esc(PAYMENT.supportEmail)}</a>`);
+  $("planSupport").innerHTML = parts.length ? "Need help with payment? " + parts.join(" · ") : "";
+}
+
+function renderPlanHeader() {
+  if (!account.trialStart) return;
+  const st = accessState();
+  const h = $("planHeading"), s = $("planSub");
+  if (st.status === "expired") {
+    h.textContent = `Your ${TRIAL_DAYS}-day free trial has ended`;
+    s.textContent = "Subscribe to continue using Lawyer Case Diary. Your cases and documents are safe and will be back as soon as your plan is active.";
+  } else if (st.status === "paid") {
+    h.textContent = "Your plan is active";
+    s.textContent = `Premium is valid until ${fmtDateObj(st.end)} (${st.daysLeft} days left). You can renew early below.`;
+  } else {
+    h.textContent = "Choose your plan";
+    s.textContent = `You have ${st.daysLeft} day${st.daysLeft === 1 ? "" : "s"} of free trial left (until ${fmtDateObj(st.end)}). Subscribe any time to keep going without a break.`;
+  }
+}
+
+function renderPlanGrid() {
+  $("planGrid").innerHTML = PLANS.map((p) => `
+    <div class="plan ${p.best ? "best" : ""}">
+      ${p.tag ? `<div class="ribbon">${esc(p.tag)}</div>` : ""}
+      <h3>${esc(p.name)}</h3>
+      <div class="price">${money(p.price)}<small> / ${esc(p.period)}</small></div>
+      <ul>${FEATURES.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>
+      <button class="btn ${p.best ? "gold" : "primary"} block" type="button" data-act="add" data-plan="${esc(p.id)}">🛒 Add to cart</button>
+    </div>`).join("");
+}
+
+function renderCart() {
+  const plan = PLANS.find((p) => p.id === cart);
+  const cartBox = $("cartBox"), coBox = $("checkoutBox");
+  if (!plan) { cartBox.classList.add("hidden"); coBox.classList.add("hidden"); return; }
+
+  cartBox.classList.remove("hidden");
+  cartBox.innerHTML = `
+    <h3 class="sec">🛒 Your cart</h3>
+    <div class="cart-row">
+      <div><b>Lawyer Case Diary — ${esc(plan.name)}</b><div class="muted small">${plan.days} days of full access</div></div>
+      <div><b>${money(plan.price)}</b> &nbsp; <button class="btn sm danger" type="button" data-act="remove">Remove</button></div>
+    </div>
+    <div class="cart-total"><span>Total</span><span>${money(plan.price)}</span></div>
+    ${checkoutOpen ? "" : `<div class="cart-actions"><button class="btn gold lg" type="button" data-act="checkout">Proceed to checkout →</button></div>`}`;
+
+  if (!checkoutOpen) { coBox.classList.add("hidden"); return; }
+
+  const upiLink = `upi://pay?pa=${encodeURIComponent(PAYMENT.upiId)}&pn=${encodeURIComponent(PAYMENT.payeeName)}&am=${plan.price}&cu=INR&tn=${encodeURIComponent("Lawyer Case Diary " + plan.name)}`;
+  const notSet = /^yourupiid/i.test(PAYMENT.upiId);
+  coBox.classList.remove("hidden");
+  coBox.innerHTML = `
+    <h3 class="sec">Checkout · ${money(plan.price)}</h3>
+    ${notSet ? `<p class="error">Owner note: set your real UPI ID in <code>js/config.js</code> before publishing.</p>` : ""}
+    <div class="steps">
+      <div class="step"><div class="step-n">1</div><div>
+        <b>Pay ${money(plan.price)} by UPI</b>
+        <div class="upi-box"><span>${esc(PAYMENT.upiId)}</span><button class="btn sm" type="button" data-act="copy">Copy</button></div>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <a class="btn gold sm" href="${esc(upiLink)}">Pay with UPI app</a>
+          ${PAYMENT.paymentLink ? `<a class="btn sm" href="${esc(PAYMENT.paymentLink)}" target="_blank" rel="noopener">Pay online</a>` : ""}
+        </div>
+      </div></div>
+      <div class="step"><div class="step-n">2</div><div style="flex:1">
+        <b>Enter your payment details</b>
+        <label style="margin-top:8px">UPI transaction ID / UTR number
+          <input id="payRef" type="text" placeholder="e.g. 4061xxxxxxx" />
+        </label>
+        <label>Your mobile number
+          <input id="payPhone" type="tel" inputmode="numeric" maxlength="15" placeholder="10-digit mobile" />
+        </label>
+      </div></div>
+      <div class="step"><div class="step-n">3</div><div style="flex:1">
+        <b>Submit for activation</b>
+        <p class="muted small" style="margin:4px 0 8px">Your plan is switched on after the payment is verified (usually within a few hours). This page updates by itself.</p>
+        <div class="cart-actions" style="justify-content:flex-start">
+          <button class="btn ghost" type="button" data-act="backcart">← Back</button>
+          <button class="btn primary lg" type="button" data-act="submit" id="submitOrder">Submit payment</button>
+        </div>
+        <p id="checkoutError" class="error"></p>
+      </div></div>
+    </div>`;
+}
+
+function renderOrders() {
+  const box = $("orderBox");
+  if (!orders.length) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  box.innerHTML = `<h3 class="sec">Your payment requests</h3>` + orders.map((o) => {
+    const ok = o.status === "approved";
+    return `<div class="order-row">
+      <span><b>${esc(o.planName)}</b> · ${money(o.amount)}</span>
+      <span class="muted">Ref: ${esc(o.reference)}</span>
+      <span class="badge ${ok ? "ok" : "warn"}">${ok ? "Activated" : "Pending verification"}</span>
+    </div>`;
+  }).join("");
+}
+
+$("planScreen").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const act = btn.dataset.act;
+  if (act === "add") { cart = btn.dataset.plan; checkoutOpen = false; renderCart(); $("cartBox").scrollIntoView({ behavior: "smooth", block: "center" }); }
+  if (act === "remove") { cart = null; checkoutOpen = false; renderCart(); }
+  if (act === "checkout") { checkoutOpen = true; renderCart(); $("checkoutBox").scrollIntoView({ behavior: "smooth", block: "start" }); }
+  if (act === "backcart") { checkoutOpen = false; renderCart(); }
+  if (act === "copy") {
+    try { await navigator.clipboard.writeText(PAYMENT.upiId); toast("UPI ID copied"); }
+    catch (_) { toast("Copy not available — please type the UPI ID."); }
+  }
+  if (act === "submit") submitOrder();
 });
 
-/* ---------------- list rendering ---------------- */
+async function submitOrder() {
+  const plan = PLANS.find((p) => p.id === cart);
+  if (!plan) return;
+  const reference = ($("payRef").value || "").trim();
+  const phone = ($("payPhone").value || "").replace(/\D/g, "");
+  const err = $("checkoutError");
+  err.textContent = "";
+  if (reference.length < 6) { err.textContent = "Please enter the UPI transaction ID / UTR number."; return; }
+  if (phone.length < 10) { err.textContent = "Please enter a valid mobile number."; return; }
+  const btn = $("submitOrder");
+  btn.disabled = true; btn.textContent = "Submitting…";
+  try {
+    await withTimeout(addDoc(collection(db, "orders"), {
+      uid: currentUser.uid, email: currentUser.email || "", name: advocate.name,
+      planId: plan.id, planName: plan.name, amount: plan.price, days: plan.days,
+      reference, phone, status: "pending", createdAt: serverTimestamp()
+    }), 20000, "Request timed out. Check your internet and try again.");
+    cart = null; checkoutOpen = false;
+    renderCart();
+    toast("✔ Payment submitted. We will activate your plan after verification.", 6000);
+    $("orderBox").scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (e) {
+    err.textContent = "Could not submit: " + (e.message || e);
+    btn.disabled = false; btn.textContent = "Submit payment";
+  }
+}
+
+/* =====================================================================
+   case list rendering
+   ===================================================================== */
+function dayLabel(iso, today) {
+  const n = daysBetween(today, iso);
+  if (n === 0) return "Today";
+  if (n === 1) return "Tomorrow";
+  if (n > 1) return `In ${n} days`;
+  return `${-n} day${n === -1 ? "" : "s"} ago`;
+}
+
+function upItem(c, today, cls = "") {
+  const [, m, d] = c.nextHearing.split("-");
+  const mon = new Date(c.nextHearing + "T00:00:00").toLocaleDateString("en-IN", { month: "short" });
+  return `<div class="up-item" data-edit="${esc(c.id)}">
+    <div class="up-date ${cls}"><b>${esc(d)}</b><span>${esc(mon)}</span></div>
+    <div>
+      <div class="up-title">${esc(c.appellant)} vs ${esc(c.respondent)}</div>
+      <div class="up-sub">${esc(c.caseNumber)} · ${esc(dayLabel(c.nextHearing, today))}</div>
+    </div>
+  </div>`;
+}
+
 function render() {
   const term = $("searchInput").value.trim().toLowerCase();
   const status = $("statusFilter").value;
   const today = todayISO();
   const weekEnd = addDaysISO(today, 7);
+  const pending = cases.filter((c) => c.status !== "Disposed");
 
   $("statTotal").textContent = cases.length;
-  $("statPending").textContent = cases.filter((c) => c.status !== "Disposed").length;
-  $("statDisposed").textContent = cases.filter((c) => c.status === "Disposed").length;
-  $("statWeek").textContent = cases.filter((c) => c.status !== "Disposed" && c.nextHearing >= today && c.nextHearing <= weekEnd).length;
+  $("statPending").textContent = pending.length;
+  $("statDisposed").textContent = cases.length - pending.length;
+  $("statWeek").textContent = pending.filter((c) => c.nextHearing >= today && c.nextHearing <= weekEnd).length;
 
+  // side panels
+  const upcoming = pending.filter((c) => c.nextHearing && c.nextHearing >= today)
+    .sort((a, b) => a.nextHearing.localeCompare(b.nextHearing)).slice(0, 8);
+  $("upcomingList").innerHTML = upcoming.length
+    ? upcoming.map((c) => upItem(c, today, c.nextHearing === today ? "today" : "")).join("")
+    : `<div class="up-empty">No upcoming hearings.</div>`;
+  const overdue = pending.filter((c) => c.nextHearing && c.nextHearing < today)
+    .sort((a, b) => b.nextHearing.localeCompare(a.nextHearing)).slice(0, 6);
+  $("overduePanel").classList.toggle("hidden", !overdue.length);
+  $("overdueList").innerHTML = overdue.map((c) => upItem(c, today, "late")).join("");
+
+  // main list
   const filtered = cases.filter((c) => {
     if (status !== "all" && (c.status || "Pending") !== status) return false;
     if (!term) return true;
@@ -172,18 +492,19 @@ function render() {
   $("caseList").innerHTML = filtered.map((c) => {
     const disposed = c.status === "Disposed";
     const isToday = !disposed && c.nextHearing === today;
-    const docs = (c.documents || []).map((d) =>
-      `<a class="doc-chip" href="${esc(d.url)}" target="_blank" rel="noopener">📎 ${esc(d.name)}</a>`).join("");
+    const late = !disposed && c.nextHearing && c.nextHearing < today;
+    const docs = (c.documents || []).map((d) => d.url
+      ? `<a class="doc-chip" href="${esc(d.url)}" target="_blank" rel="noopener">📎 ${esc(d.name)}</a>`
+      : `<button class="doc-chip" type="button" data-open="${esc(c.id)}" data-file="${esc(d.id)}">📎 ${esc(d.name)}</button>`).join("");
+    let badge;
+    if (disposed) badge = `<span class="badge ok">Disposed ${esc(fmtDate(c.disposalDate))}</span>`;
+    else if (isToday) badge = `<span class="badge warn">Hearing TODAY</span>`;
+    else if (late) badge = `<span class="badge late">Date passed · ${esc(fmtDate(c.nextHearing))}</span>`;
+    else if (c.nextHearing) badge = `<span class="badge">Next: ${esc(fmtDate(c.nextHearing))}</span>`;
+    else badge = `<span class="badge">No hearing date</span>`;
     return `
-    <article class="case-card ${disposed ? "disposed" : ""} ${isToday ? "today" : ""}">
-      <div class="case-head">
-        <span class="case-no">${esc(c.caseNumber)}</span>
-        <span>
-          ${disposed
-            ? `<span class="badge ok">Disposed ${esc(fmtDate(c.disposalDate))}</span>`
-            : `<span class="badge ${isToday ? "warn" : ""}">${c.nextHearing ? (isToday ? "Hearing TODAY" : "Next: " + esc(fmtDate(c.nextHearing))) : "No hearing date"}</span>`}
-        </span>
-      </div>
+    <article class="case-card ${disposed ? "disposed" : ""} ${isToday ? "today" : ""} ${late ? "late" : ""}">
+      <div class="case-head"><span class="case-no">${esc(c.caseNumber)}</span>${badge}</div>
       <div class="parties"><b>${esc(c.appellant)}</b><span class="vs">vs</span><b>${esc(c.respondent)}</b></div>
       <div class="meta">
         <span><b>Type:</b> ${esc(c.caseType)}</span>
@@ -206,14 +527,80 @@ function render() {
 $("searchInput").addEventListener("input", render);
 $("statusFilter").addEventListener("change", render);
 
-$("caseList").addEventListener("click", (e) => {
+function onListClick(e) {
   const edit = e.target.closest("[data-edit]");
   const del = e.target.closest("[data-del]");
+  const open = e.target.closest("[data-open]");
+  if (open) { downloadDoc(open.dataset.open, open.dataset.file); return; }
   if (edit) openCaseModal(cases.find((c) => c.id === edit.dataset.edit));
   if (del) deleteCase(cases.find((c) => c.id === del.dataset.del));
-});
+}
+$("caseList").addEventListener("click", onListClick);
+$("upcomingList").addEventListener("click", onListClick);
+$("overdueList").addEventListener("click", onListClick);
 
-/* ---------------- case modal ---------------- */
+/* =====================================================================
+   documents (stored inside Firestore as small chunks – no Storage needed)
+   ===================================================================== */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = () => reject(r.error || new Error("Could not read the file."));
+    r.readAsDataURL(file);
+  });
+}
+
+async function saveFile(caseId, file, onProgress) {
+  const b64 = await fileToBase64(file);
+  const fileId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const n = Math.max(1, Math.ceil(b64.length / CHUNK));
+  for (let i = 0; i < n; i++) {
+    await withTimeout(
+      setDoc(doc(db, "cases", caseId, "chunks", `${fileId}_${i}`), {
+        fileId, index: i, data: b64.slice(i * CHUNK, (i + 1) * CHUNK)
+      }),
+      30000, "Upload timed out. Check your internet connection and the Firestore rules."
+    );
+    onProgress((i + 1) / n);
+  }
+  return { id: fileId, name: file.name, size: file.size, type: file.type || "application/octet-stream", chunks: n };
+}
+
+async function removeFileChunks(caseId, d) {
+  if (!d.chunks) return;
+  await Promise.all(Array.from({ length: d.chunks }, (_, i) =>
+    deleteDoc(doc(db, "cases", caseId, "chunks", `${d.id}_${i}`)).catch(() => {})));
+}
+
+async function downloadDoc(caseId, fileId) {
+  const c = cases.find((x) => x.id === caseId);
+  const d = (c?.documents || []).find((x) => x.id === fileId);
+  if (!d) return;
+  toast(`Preparing ${d.name}…`);
+  try {
+    const snaps = await withTimeout(
+      Promise.all(Array.from({ length: d.chunks }, (_, i) => getDoc(doc(db, "cases", caseId, "chunks", `${d.id}_${i}`)))),
+      40000, "Timed out while loading the document."
+    );
+    const b64 = snaps.map((s) => s.data().data).join("");
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: d.type }));
+    const a = document.createElement("a");
+    a.href = url; a.download = d.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (err) {
+    console.error(err);
+    toast("Could not open the document: " + (err.message || err), 5000);
+  }
+}
+
+/* =====================================================================
+   case modal
+   ===================================================================== */
 const form = $("caseForm");
 const FIELDS = ["clientName", "appellant", "respondent", "caseType", "section", "courtName", "division",
   "district", "tehsil", "village", "khasra", "nextHearing", "status", "disposalDate", "notes"];
@@ -229,6 +616,8 @@ function openCaseModal(c = null) {
   $("caseError").textContent = "";
   $("fileInput").value = "";
   $("uploadProgress").classList.add("hidden");
+  $("uploadBar").style.width = "0";
+  $("uploadLabel").textContent = "";
   $("caseModalTitle").textContent = c ? "Edit case" : "New case";
   $("caseNoPreview").textContent = c ? c.caseNumber : "Will be generated automatically on save";
   keptDocs = c ? [...(c.documents || [])] : [];
@@ -243,7 +632,7 @@ function closeCaseModal() { $("caseModal").classList.add("hidden"); editing = nu
 function renderExistingDocs() {
   $("existingDocs").innerHTML = keptDocs.map((d, i) => `
     <div class="doc-row">
-      <a href="${esc(d.url)}" target="_blank" rel="noopener">📎 ${esc(d.name)}</a>
+      <span>📎 ${esc(d.name)}</span>
       <button class="btn sm danger" type="button" data-rm="${i}">Remove</button>
     </div>`).join("");
 }
@@ -255,10 +644,10 @@ $("existingDocs").addEventListener("click", (e) => {
 });
 
 $("addBtn").onclick = () => openCaseModal(null);
+$("fabAdd").onclick = () => openCaseModal(null);
 $("closeCaseModal").onclick = closeCaseModal;
 $("cancelCase").onclick = closeCaseModal;
 
-/* ---- unique case number: per-advocate, per-year counter inside a transaction ---- */
 async function createCaseWithNumber(uid, data) {
   const year = new Date().getFullYear();
   const counterRef = doc(db, "counters", uid);
@@ -278,39 +667,12 @@ async function createCaseWithNumber(uid, data) {
   return { id: caseRef.id, caseNumber };
 }
 
-function uploadFile(uid, caseId, file, onProgress) {
-  return new Promise((resolve, reject) => {
-    const safe = file.name.replace(/[^\w.\-() ]+/g, "_");
-    const path = `users/${uid}/cases/${caseId}/${Date.now()}_${safe}`;
-    const task = uploadBytesResumable(ref(storage, path), file);
-    // Give up if nothing moves for 20 seconds (Storage not set up / rules not published)
-    let timer;
-    const arm = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        try { task.cancel(); } catch (_) {}
-        reject(new Error("Upload timed out. Firebase Storage is not set up yet or its rules are not published."));
-      }, 20000);
-    };
-    arm();
-    task.on("state_changed",
-      (s) => { arm(); onProgress(s.bytesTransferred / s.totalBytes); },
-      (err) => { clearTimeout(timer); reject(err); },
-      async () => {
-        clearTimeout(timer);
-        try { resolve({ name: file.name, path, size: file.size, url: await getDownloadURL(task.snapshot.ref) }); }
-        catch (e) { reject(e); }
-      }
-    );
-  });
-}
-
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   $("caseError").textContent = "";
   const files = [...$("fileInput").files];
   const tooBig = files.find((f) => f.size > MAX_FILE);
-  if (tooBig) { $("caseError").textContent = `"${tooBig.name}" is larger than 10 MB.`; return; }
+  if (tooBig) { $("caseError").textContent = `"${tooBig.name}" is larger than 5 MB. Please compress or split it.`; return; }
 
   const data = {};
   FIELDS.forEach((f) => { data[f] = (form[f].value || "").trim(); });
@@ -323,47 +685,48 @@ form.addEventListener("submit", async (e) => {
   $("saveCase").textContent = "Saving…";
   try {
     const uid = currentUser.uid;
-    let caseId, removedDocs = [], savedNumber = "";
+    let caseId, savedNumber = "", removedDocs = [];
 
     if (editing) {
       caseId = editing.id;
-      removedDocs = (editing.documents || []).filter((d) => !keptDocs.some((k) => k.path === d.path));
-      await updateDoc(doc(db, "cases", caseId), { ...data, documents: keptDocs, updatedAt: serverTimestamp() });
+      savedNumber = editing.caseNumber;
+      removedDocs = (editing.documents || []).filter((d) => !keptDocs.some((k) => k.id === d.id));
+      await withTimeout(updateDoc(doc(db, "cases", caseId), { ...data, documents: keptDocs, updatedAt: serverTimestamp() }),
+        20000, "Saving timed out. Check your internet connection.");
     } else {
-      const created = await createCaseWithNumber(uid, { ...data, documents: [] });
+      const created = await withTimeout(createCaseWithNumber(uid, { ...data, documents: [] }),
+        20000, "Saving timed out. Check your internet connection and Firestore rules.");
       caseId = created.id;
       savedNumber = created.caseNumber;
     }
 
-    // upload new documents, then attach them to the case
     let uploadWarning = "";
     if (files.length) {
       $("uploadProgress").classList.remove("hidden");
       const uploaded = [];
       try {
         for (let i = 0; i < files.length; i++) {
-          const item = await uploadFile(uid, caseId, files[i], (p) => {
+          $("uploadLabel").textContent = `Uploading ${i + 1} of ${files.length}: ${files[i].name}`;
+          const item = await saveFile(caseId, files[i], (p) => {
             $("uploadBar").style.width = `${((i + p) / files.length) * 100}%`;
           });
           uploaded.push(item);
         }
       } catch (upErr) {
         console.error(upErr);
-        uploadWarning = "Case saved, but the document(s) could not be uploaded: " + (upErr.message || upErr) +
-          " Open Firebase Console → Build → Storage → Get started, publish storage.rules, then Edit this case and attach the file again.";
+        uploadWarning = "Case saved, but a document could not be uploaded: " + (upErr.message || upErr) +
+          " You can open the case with Edit and attach it again.";
       }
       if (uploaded.length) {
         await updateDoc(doc(db, "cases", caseId), { documents: [...keptDocs, ...uploaded], updatedAt: serverTimestamp() });
       }
     }
 
-    // delete removed files from storage (best effort)
-    await Promise.all(removedDocs.map((d) => deleteObject(ref(storage, d.path)).catch(() => {})));
+    await Promise.all(removedDocs.map((d) => removeFileChunks(caseId, d)));
 
     const wasEdit = !!editing;
-    const shownNo = wasEdit ? editing.caseNumber : savedNumber;
     closeCaseModal();
-    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", shownNo, uploadWarning);
+    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", savedNumber, uploadWarning);
   } catch (err) {
     console.error(err);
     $("caseError").textContent = "Save failed: " + (err.message || err);
@@ -375,9 +738,9 @@ form.addEventListener("submit", async (e) => {
 
 function showSuccess(title, caseNumber, warning = "") {
   $("successTitle").textContent = title;
+  $("successCaseNo").textContent = caseNumber || "";
   $("successWarn").textContent = warning;
   $("successWarn").classList.toggle("hidden", !warning);
-  $("successCaseNo").textContent = caseNumber || "";
   $("successModal").classList.remove("hidden");
 }
 $("successOk").onclick = () => $("successModal").classList.add("hidden");
@@ -385,9 +748,9 @@ $("successAdd").onclick = () => { $("successModal").classList.add("hidden"); ope
 
 async function deleteCase(c) {
   if (!c) return;
-  if (!confirm(`Delete case ${c.caseNumber} (${c.appellant} vs ${c.respondent})?\nIts uploaded documents will also be deleted. This cannot be undone.`)) return;
+  if (!confirm(`Delete case ${c.caseNumber} (${c.appellant} vs ${c.respondent})?\nIts documents will also be deleted. This cannot be undone.`)) return;
   try {
-    await Promise.all((c.documents || []).map((d) => deleteObject(ref(storage, d.path)).catch(() => {})));
+    await Promise.all((c.documents || []).map((d) => removeFileChunks(c.id, d)));
     await deleteDoc(doc(db, "cases", c.id));
     toast("Case deleted.");
   } catch (err) {
@@ -395,7 +758,9 @@ async function deleteCase(c) {
   }
 }
 
-/* ---------------- PDF: upcoming hearings by date ---------------- */
+/* =====================================================================
+   hearings report (browser print → "Save as PDF")
+   ===================================================================== */
 $("reportBtn").onclick = () => {
   $("repFrom").value = todayISO();
   $("repTo").value = addDaysISO(todayISO(), 30);
@@ -406,7 +771,7 @@ const closeReport = () => $("reportModal").classList.add("hidden");
 $("closeReportModal").onclick = closeReport;
 $("cancelReport").onclick = closeReport;
 
-$("makePdf").onclick = async () => {
+$("makePdf").onclick = () => {
   const from = $("repFrom").value, to = $("repTo").value;
   if (!from || !to || from > to) { $("reportError").textContent = "Choose a valid date range."; return; }
 
@@ -417,39 +782,39 @@ $("makePdf").onclick = async () => {
 
   const groups = {};
   list.forEach((c) => (groups[c.nextHearing] ||= []).push(c));
+  const th = "border:1px solid #b9c4d6;padding:4px;text-align:left";
+  const td = "border:1px solid #b9c4d6;padding:4px;vertical-align:top";
 
   const html = `
-    <div style="font-family:'Segoe UI','Noto Sans','Noto Sans Devanagari',Arial,sans-serif;color:#111;padding:6px 10px;width:100%">
-      <div style="text-align:center;border-bottom:2px solid #1e3a5f;padding-bottom:8px;margin-bottom:12px">
-        <div style="font-size:20px;font-weight:700;color:#1e3a5f">Upcoming Hearings Report</div>
-        <div style="font-size:12px;margin-top:4px">
-          Advocate: <b>${esc(advocate.name)}</b>${advocate.enrolment ? ` &nbsp;|&nbsp; Enrolment: ${esc(advocate.enrolment)}` : ""}
-        </div>
+    <div style="font-family:'Segoe UI','Noto Sans','Noto Sans Devanagari',Arial,sans-serif;color:#111;width:100%">
+      <div style="text-align:center;border-bottom:2px solid #0f2742;padding-bottom:8px;margin-bottom:12px">
+        <div style="font-size:20px;font-weight:700;color:#0f2742">Upcoming Hearings Report</div>
+        <div style="font-size:12px;margin-top:4px">Advocate: <b>${esc(advocate.name)}</b>${advocate.enrolment ? ` &nbsp;|&nbsp; Enrolment: ${esc(advocate.enrolment)}` : ""}</div>
         <div style="font-size:12px">Period: ${esc(fmtDate(from))} to ${esc(fmtDate(to))} &nbsp;|&nbsp; Total hearings: ${list.length}</div>
       </div>
       ${Object.keys(groups).map((date) => `
         <div style="page-break-inside:avoid;margin-bottom:14px">
-          <div style="background:#1e3a5f;color:#fff;padding:5px 10px;font-weight:600;font-size:13px">
+          <div style="background:#0f2742;color:#fff;padding:5px 10px;font-weight:600;font-size:13px">
             ${esc(fmtLongDate(date))} &nbsp;(${groups[date].length} ${groups[date].length > 1 ? "cases" : "case"})
           </div>
-          <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <table style="width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed">
             <thead>
               <tr style="background:#e9eef6">
-                <th style="border:1px solid #b9c4d6;padding:4px;text-align:left;width:14%">Case No.</th>
-                <th style="border:1px solid #b9c4d6;padding:4px;text-align:left;width:28%">Appellant vs Respondent</th>
-                <th style="border:1px solid #b9c4d6;padding:4px;text-align:left;width:14%">Type / Section</th>
-                <th style="border:1px solid #b9c4d6;padding:4px;text-align:left;width:18%">Court</th>
-                <th style="border:1px solid #b9c4d6;padding:4px;text-align:left;width:26%">Village / Khasra / Notes</th>
+                <th style="${th};width:15%">Case No.</th>
+                <th style="${th};width:27%">Appellant vs Respondent</th>
+                <th style="${th};width:14%">Type / Section</th>
+                <th style="${th};width:19%">Court</th>
+                <th style="${th};width:25%">Village / Khasra / Notes</th>
               </tr>
             </thead>
             <tbody>
               ${groups[date].map((c) => `
                 <tr style="page-break-inside:avoid">
-                  <td style="border:1px solid #b9c4d6;padding:4px;vertical-align:top"><b>${esc(c.caseNumber)}</b></td>
-                  <td style="border:1px solid #b9c4d6;padding:4px;vertical-align:top">${esc(c.appellant)}<br/><i>vs</i><br/>${esc(c.respondent)}${c.clientName ? `<br/><small>Client: ${esc(c.clientName)}</small>` : ""}</td>
-                  <td style="border:1px solid #b9c4d6;padding:4px;vertical-align:top">${esc(c.caseType)}<br/>${esc(c.section)}</td>
-                  <td style="border:1px solid #b9c4d6;padding:4px;vertical-align:top">${esc(c.courtName)}<br/><small>${esc([c.tehsil, c.district].filter(Boolean).join(", "))}</small></td>
-                  <td style="border:1px solid #b9c4d6;padding:4px;vertical-align:top">${esc(c.village || "")}${c.khasra ? `<br/>Khasra: ${esc(c.khasra)}` : ""}${c.notes ? `<br/><small>${esc(c.notes)}</small>` : ""}</td>
+                  <td style="${td}"><b>${esc(c.caseNumber)}</b></td>
+                  <td style="${td}">${esc(c.appellant)}<br/><i>vs</i><br/>${esc(c.respondent)}${c.clientName ? `<br/><small>Client: ${esc(c.clientName)}</small>` : ""}</td>
+                  <td style="${td}">${esc(c.caseType)}<br/>${esc(c.section)}</td>
+                  <td style="${td}">${esc(c.courtName)}<br/><small>${esc([c.tehsil, c.district].filter(Boolean).join(", "))}</small></td>
+                  <td style="${td}">${esc(c.village || "")}${c.khasra ? `<br/>Khasra: ${esc(c.khasra)}` : ""}${c.notes ? `<br/><small>${esc(c.notes)}</small>` : ""}</td>
                 </tr>`).join("")}
             </tbody>
           </table>
@@ -457,8 +822,6 @@ $("makePdf").onclick = async () => {
       <div style="font-size:10px;color:#666;text-align:right;margin-top:10px">Generated on ${esc(fmtDate(todayISO()))} · Lawyer Case Diary</div>
     </div>`;
 
-
-  // Print through the browser (text-based, never cut off). Choose "Save as PDF" as the printer.
   const fileTitle = `Hearings_${from}_to_${to}`;
   const frame = document.createElement("iframe");
   frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
@@ -486,7 +849,7 @@ $("makePdf").onclick = async () => {
       frame.contentWindow.onafterprint = cleanup;
       frame.contentWindow.print();
       closeReport();
-      toast('In the print window choose "Save as PDF" to download.');
+      toast('In the print window choose "Save as PDF" to download.', 5000);
     } catch (err) {
       console.error(err);
       $("reportError").textContent = "Could not open print window: " + (err.message || err);
@@ -495,9 +858,16 @@ $("makePdf").onclick = async () => {
   }, 400);
 };
 
-// close modals with Escape
+/* =====================================================================
+   misc
+   ===================================================================== */
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("caseModal").classList.contains("hidden")) closeCaseModal();
   if (!$("reportModal").classList.contains("hidden")) closeReport();
 });
+
+// Installable app (PWA / APK wrapper)
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
