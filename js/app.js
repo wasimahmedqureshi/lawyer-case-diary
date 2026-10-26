@@ -309,7 +309,7 @@ form.addEventListener("submit", async (e) => {
   $("saveCase").textContent = "Saving…";
   try {
     const uid = currentUser.uid;
-    let caseId, removedDocs = [];
+    let caseId, removedDocs = [], savedNumber = "";
 
     if (editing) {
       caseId = editing.id;
@@ -318,7 +318,7 @@ form.addEventListener("submit", async (e) => {
     } else {
       const created = await createCaseWithNumber(uid, { ...data, documents: [] });
       caseId = created.id;
-      toast(`Case saved: ${created.caseNumber}`);
+      savedNumber = created.caseNumber;
     }
 
     // upload new documents, then attach them to the case
@@ -337,8 +337,10 @@ form.addEventListener("submit", async (e) => {
     // delete removed files from storage (best effort)
     await Promise.all(removedDocs.map((d) => deleteObject(ref(storage, d.path)).catch(() => {})));
 
-    if (editing) toast("Case updated.");
+    const wasEdit = !!editing;
+    const shownNo = wasEdit ? editing.caseNumber : savedNumber;
     closeCaseModal();
+    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", shownNo);
   } catch (err) {
     console.error(err);
     $("caseError").textContent = "Save failed: " + (err.message || err);
@@ -347,6 +349,14 @@ form.addEventListener("submit", async (e) => {
     $("saveCase").textContent = "Save case";
   }
 });
+
+function showSuccess(title, caseNumber) {
+  $("successTitle").textContent = title;
+  $("successCaseNo").textContent = caseNumber || "";
+  $("successModal").classList.remove("hidden");
+}
+$("successOk").onclick = () => $("successModal").classList.add("hidden");
+$("successAdd").onclick = () => { $("successModal").classList.add("hidden"); openCaseModal(null); };
 
 async function deleteCase(c) {
   if (!c) return;
@@ -422,10 +432,22 @@ $("makePdf").onclick = async () => {
       <div style="font-size:10px;color:#666;text-align:right;margin-top:10px">Generated on ${esc(fmtDate(todayISO()))} · Lawyer Case Diary</div>
     </div>`;
 
+  // Render the report visibly (on top of everything) so the PDF library can capture it.
+  // A hidden / off-screen / negative z-index element produces a blank PDF.
+  const overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(255,255,255,.97);z-index:99999;overflow:auto;padding:20px 0;";
+  const note = document.createElement("div");
+  note.textContent = "Generating PDF… please wait";
+  note.style.cssText = "text-align:center;font:600 14px sans-serif;color:#1e3a5f;margin-bottom:10px;";
   const holder = document.createElement("div");
-  holder.style.cssText = "position:fixed;left:0;top:0;width:780px;background:#fff;z-index:-1;";
+  holder.style.cssText = "width:780px;margin:0 auto;background:#fff;";
   holder.innerHTML = html;
-  document.body.appendChild(holder);
+  overlay.appendChild(note);
+  overlay.appendChild(holder);
+  document.body.appendChild(overlay);
+  overlay.scrollTop = 0;
+  window.scrollTo(0, 0);
+  await new Promise((r) => setTimeout(r, 300)); // let fonts/layout settle
 
   $("makePdf").disabled = true;
   $("makePdf").textContent = "Generating…";
@@ -434,7 +456,7 @@ $("makePdf").onclick = async () => {
       margin: [10, 8, 10, 8],
       filename: `Hearings_${from}_to_${to}.pdf`,
       image: { type: "jpeg", quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", scrollX: 0, scrollY: 0, windowWidth: 800 },
       jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
       pagebreak: { mode: ["css", "legacy"] }
     }).from(holder).save();
@@ -444,7 +466,7 @@ $("makePdf").onclick = async () => {
     console.error(err);
     $("reportError").textContent = "PDF failed: " + (err.message || err);
   } finally {
-    holder.remove();
+    overlay.remove();
     $("makePdf").disabled = false;
     $("makePdf").textContent = "Download PDF";
   }
