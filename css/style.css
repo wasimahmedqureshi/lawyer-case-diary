@@ -133,3 +133,10 @@ input:focus, select:focus, textarea:focus { outline: 2px solid rgba(30,58,95,.25
   .topbar .muted { display: none; }
   .modal-box { padding: 16px; }
 }
+
+/* ---------- success confirmation ---------- */
+.center-modal { align-items: center; z-index: 60; }
+.success-box { text-align: center; }
+.success-icon { width: 60px; height: 60px; line-height: 60px; margin: 0 auto 10px; border-radius: 50%; background: #dff4ea; color: var(--ok); font-size: 2rem; font-weight: 700; }
+.success-box h2 { color: var(--navy); margin: 0 0 8px; }
+.success-no { font-size: 1.5rem; font-weight: 700; color: var(--navy); letter-spacing: .5px; margin-bottom: 6px; }
