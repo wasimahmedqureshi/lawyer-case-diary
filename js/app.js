@@ -283,10 +283,24 @@ function uploadFile(uid, caseId, file, onProgress) {
     const safe = file.name.replace(/[^\w.\-() ]+/g, "_");
     const path = `users/${uid}/cases/${caseId}/${Date.now()}_${safe}`;
     const task = uploadBytesResumable(ref(storage, path), file);
+    // Give up if nothing moves for 20 seconds (Storage not set up / rules not published)
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        try { task.cancel(); } catch (_) {}
+        reject(new Error("Upload timed out. Firebase Storage is not set up yet or its rules are not published."));
+      }, 20000);
+    };
+    arm();
     task.on("state_changed",
-      (s) => onProgress(s.bytesTransferred / s.totalBytes),
-      reject,
-      async () => resolve({ name: file.name, path, size: file.size, url: await getDownloadURL(task.snapshot.ref) })
+      (s) => { arm(); onProgress(s.bytesTransferred / s.totalBytes); },
+      (err) => { clearTimeout(timer); reject(err); },
+      async () => {
+        clearTimeout(timer);
+        try { resolve({ name: file.name, path, size: file.size, url: await getDownloadURL(task.snapshot.ref) }); }
+        catch (e) { reject(e); }
+      }
     );
   });
 }
@@ -322,16 +336,25 @@ form.addEventListener("submit", async (e) => {
     }
 
     // upload new documents, then attach them to the case
+    let uploadWarning = "";
     if (files.length) {
       $("uploadProgress").classList.remove("hidden");
       const uploaded = [];
-      for (let i = 0; i < files.length; i++) {
-        const item = await uploadFile(uid, caseId, files[i], (p) => {
-          $("uploadBar").style.width = `${((i + p) / files.length) * 100}%`;
-        });
-        uploaded.push(item);
+      try {
+        for (let i = 0; i < files.length; i++) {
+          const item = await uploadFile(uid, caseId, files[i], (p) => {
+            $("uploadBar").style.width = `${((i + p) / files.length) * 100}%`;
+          });
+          uploaded.push(item);
+        }
+      } catch (upErr) {
+        console.error(upErr);
+        uploadWarning = "Case saved, but the document(s) could not be uploaded: " + (upErr.message || upErr) +
+          " Open Firebase Console → Build → Storage → Get started, publish storage.rules, then Edit this case and attach the file again.";
       }
-      await updateDoc(doc(db, "cases", caseId), { documents: [...keptDocs, ...uploaded], updatedAt: serverTimestamp() });
+      if (uploaded.length) {
+        await updateDoc(doc(db, "cases", caseId), { documents: [...keptDocs, ...uploaded], updatedAt: serverTimestamp() });
+      }
     }
 
     // delete removed files from storage (best effort)
@@ -340,7 +363,7 @@ form.addEventListener("submit", async (e) => {
     const wasEdit = !!editing;
     const shownNo = wasEdit ? editing.caseNumber : savedNumber;
     closeCaseModal();
-    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", shownNo);
+    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", shownNo, uploadWarning);
   } catch (err) {
     console.error(err);
     $("caseError").textContent = "Save failed: " + (err.message || err);
@@ -350,8 +373,10 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-function showSuccess(title, caseNumber) {
+function showSuccess(title, caseNumber, warning = "") {
   $("successTitle").textContent = title;
+  $("successWarn").textContent = warning;
+  $("successWarn").classList.toggle("hidden", !warning);
   $("successCaseNo").textContent = caseNumber || "";
   $("successModal").classList.remove("hidden");
 }
@@ -432,22 +457,6 @@ $("makePdf").onclick = async () => {
       <div style="font-size:10px;color:#666;text-align:right;margin-top:10px">Generated on ${esc(fmtDate(todayISO()))} · Lawyer Case Diary</div>
     </div>`;
 
-  // Render the report visibly (on top of everything) so the PDF library can capture it.
-  // A hidden / off-screen / negative z-index element produces a blank PDF.
-  const overlay = document.createElement("div");
-  overlay.style.cssText = "position:fixed;inset:0;background:rgba(255,255,255,.97);z-index:99999;overflow:auto;padding:20px 0;";
-  const note = document.createElement("div");
-  note.textContent = "Generating PDF… please wait";
-  note.style.cssText = "text-align:center;font:600 14px sans-serif;color:#1e3a5f;margin-bottom:10px;";
-  const holder = document.createElement("div");
-  holder.style.cssText = "width:780px;margin:0 auto;background:#fff;";
-  holder.innerHTML = html;
-  overlay.appendChild(note);
-  overlay.appendChild(holder);
-  document.body.appendChild(overlay);
-  overlay.scrollTop = 0;
-  window.scrollTo(0, 0);
-  await new Promise((r) => setTimeout(r, 300)); // let fonts/layout settle
 
   $("makePdf").disabled = true;
   $("makePdf").textContent = "Generating…";
@@ -456,17 +465,16 @@ $("makePdf").onclick = async () => {
       margin: [10, 8, 10, 8],
       filename: `Hearings_${from}_to_${to}.pdf`,
       image: { type: "jpeg", quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", scrollX: 0, scrollY: 0, windowWidth: 800 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", scrollX: 0, scrollY: 0 },
       jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
       pagebreak: { mode: ["css", "legacy"] }
-    }).from(holder).save();
+    }).from(html, "string").save();
     closeReport();
     toast("PDF downloaded.");
   } catch (err) {
     console.error(err);
     $("reportError").textContent = "PDF failed: " + (err.message || err);
   } finally {
-    overlay.remove();
     $("makePdf").disabled = false;
     $("makePdf").textContent = "Download PDF";
   }
