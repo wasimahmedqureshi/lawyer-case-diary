@@ -307,6 +307,19 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <!-- Start-up watchdog: tells you what is wrong if the app does not start -->
+  <script>
+    setTimeout(function () {
+      var s = document.getElementById("splash");
+      if (!s || s.classList.contains("hidden")) return;
+      var m = document.createElement("div");
+      m.style.cssText = "color:#fff;max-width:440px;text-align:center;padding:0 18px;font:14px/1.6 sans-serif";
+      m.innerHTML = window.__appBooted
+        ? "<b>App started, but your account data is not loading.</b><br>Check your internet, and make sure the new <code>firestore.rules</code> are published in Firebase (Firestore → Rules → Publish). Then press Ctrl+Shift+R."
+        : "<b>App files could not be loaded.</b><br>One of these files is missing or old on GitHub: <code>js/app.js</code>, <code>js/config.js</code>, <code>js/firebase-config.js</code>. Upload all of them from the latest zip (inside the <code>js</code> folder), then press Ctrl+Shift+R.";
+      s.appendChild(m);
+    }, 10000);
+  </script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>
