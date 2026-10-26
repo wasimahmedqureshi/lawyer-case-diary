@@ -12,6 +12,7 @@ import {
 /* =====================================================================
    helpers
    ===================================================================== */
+window.__appBooted = true;   // set only if every import above loaded fine (used by the start-up watchdog)
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (n) => "₹" + Number(n).toLocaleString("en-IN");
