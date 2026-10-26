@@ -458,26 +458,41 @@ $("makePdf").onclick = async () => {
     </div>`;
 
 
-  $("makePdf").disabled = true;
-  $("makePdf").textContent = "Generating…";
-  try {
-    await window.html2pdf().set({
-      margin: [10, 8, 10, 8],
-      filename: `Hearings_${from}_to_${to}.pdf`,
-      image: { type: "jpeg", quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", scrollX: 0, scrollY: 0 },
-      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-      pagebreak: { mode: ["css", "legacy"] }
-    }).from(html, "string").save();
-    closeReport();
-    toast("PDF downloaded.");
-  } catch (err) {
-    console.error(err);
-    $("reportError").textContent = "PDF failed: " + (err.message || err);
-  } finally {
-    $("makePdf").disabled = false;
-    $("makePdf").textContent = "Download PDF";
-  }
+  // Print through the browser (text-based, never cut off). Choose "Save as PDF" as the printer.
+  const fileTitle = `Hearings_${from}_to_${to}`;
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+  document.body.appendChild(frame);
+  const fdoc = frame.contentWindow.document;
+  fdoc.open();
+  fdoc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileTitle}</title>
+    <style>
+      @page { size: A4 portrait; margin: 12mm; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: #fff; }
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      table { table-layout: fixed; width: 100%; }
+      td, th { word-wrap: break-word; overflow-wrap: anywhere; }
+      tr, thead { page-break-inside: avoid; }
+    </style></head><body>${html}</body></html>`);
+  fdoc.close();
+
+  const oldTitle = document.title;
+  const cleanup = () => { document.title = oldTitle; setTimeout(() => frame.remove(), 500); };
+  setTimeout(() => {
+    try {
+      document.title = fileTitle;
+      frame.contentWindow.focus();
+      frame.contentWindow.onafterprint = cleanup;
+      frame.contentWindow.print();
+      closeReport();
+      toast('In the print window choose "Save as PDF" to download.');
+    } catch (err) {
+      console.error(err);
+      $("reportError").textContent = "Could not open print window: " + (err.message || err);
+      cleanup();
+    }
+  }, 400);
 };
 
 // close modals with Escape
