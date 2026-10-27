@@ -253,3 +253,29 @@ input:focus, select:focus, textarea:focus { outline: 3px solid rgba(27,61,104,.1
   .plan.best { transform: none; }
 }
 a.btn { text-decoration: none; display: inline-block; }
+
+/* ---------- live indicator ---------- */
+.live { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 20px; background: rgba(255,255,255,.12); color: #dbe6f5; font-size: .78rem; font-weight: 700; white-space: nowrap; cursor: default; }
+.live i { width: 10px; height: 10px; border-radius: 50%; background: #9aa7b8; display: inline-block; }
+.live.on i { background: #2ecc71; box-shadow: 0 0 0 0 rgba(46,204,113,.7); animation: livepulse 1.8s infinite; }
+.live.on { color: #b8f5d0; }
+.live.connecting i { background: #f5b83d; }
+.live.off i { background: #e74c3c; }
+.live.off { color: #ffc9c3; }
+@keyframes livepulse { 0% { box-shadow: 0 0 0 0 rgba(46,204,113,.65); } 70% { box-shadow: 0 0 0 8px rgba(46,204,113,0); } 100% { box-shadow: 0 0 0 0 rgba(46,204,113,0); } }
+
+/* ---------- preview / quick date ---------- */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; align-items: center; }
+.sec-title { margin: 16px 0 6px; font-size: .85rem; text-transform: uppercase; letter-spacing: .5px; color: var(--ok); }
+.modal-box.wide, .modal-box.wide-box { max-width: 760px; }
+.preview-modal { z-index: 70; }
+.pv-body { background: #eef1f6; border: 1px solid var(--line); border-radius: 12px; padding: 8px; max-height: 52vh; overflow: auto; margin-top: 8px; text-align: center; }
+.pv-body:empty { display: none; }
+.pv-body.tall { max-height: 74vh; min-height: 200px; }
+.pv-page { display: block; margin: 0 auto 8px; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.18); max-width: 100%; }
+.pv-img { max-width: 100%; height: auto; border-radius: 6px; background: #fff; }
+.pv-frame { width: 100%; height: 66vh; border: 0; background: #fff; }
+.pv-text { text-align: left; white-space: pre-wrap; word-break: break-word; background: #fff; padding: 12px; border-radius: 8px; margin: 0; font-size: .85rem; }
+.pv-loading { padding: 28px 10px; color: var(--muted); font-size: .92rem; }
+.spin { display: inline-block; width: 16px; height: 16px; margin-right: 8px; vertical-align: -3px; border: 2px solid #c9d3e3; border-top-color: var(--navy-2); border-radius: 50%; animation: spin .8s linear infinite; }
+@media (max-width: 640px) { .live b { display: none; } .live { padding: 6px 8px; } }
