@@ -162,6 +162,7 @@ $("planLogout").onclick = () => signOut(auth);
 function stopAll() {
   [unsubCases, unsubAccount, unsubOrders].forEach((u) => u && u());
   unsubCases = unsubAccount = unsubOrders = null;
+  live.server = false; live.lastSync = null;
   clearInterval(accessTimer);
   accessTimer = null;
 }
@@ -269,15 +270,39 @@ function applyAccess() {
 
 function startCases() {
   const q = query(collection(db, "cases"), where("advocateId", "==", currentUser.uid));
-  unsubCases = onSnapshot(q, (snap) => {
+  unsubCases = onSnapshot(q, { includeMetadataChanges: true }, (snap) => {
+    live.server = !snap.metadata.fromCache;       // true = data confirmed by the Firebase server
+    if (live.server) live.lastSync = new Date();
+    updateLive();
     cases = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     cases.sort((a, b) => (b.createdAt?.toMillis?.() ?? Date.now()) - (a.createdAt?.toMillis?.() ?? Date.now()));
     render();
   }, (err) => {
     console.error(err);
+    live.server = false;
+    updateLive();
     toast("Could not load cases: " + err.message);
   });
 }
+
+/* ---------- live connection indicator (green dot) ---------- */
+const live = { server: false, lastSync: null };
+function updateLive() {
+  const el = $("liveDot");
+  if (!el) return;
+  const online = navigator.onLine !== false;
+  let state = "connecting", label = "Connecting…", tip = "Connecting to the server…";
+  if (!online) { state = "off"; label = "Offline"; tip = "No internet connection. Changes are saved on this device and will sync when you are back online."; }
+  else if (live.server) {
+    state = "on"; label = "Live";
+    tip = "Live: connected to the backend database" + (live.lastSync ? ` · last synced ${live.lastSync.toLocaleTimeString("en-IN")}` : "");
+  }
+  el.className = "live " + state;
+  el.title = tip;
+  el.querySelector("b").textContent = label;
+}
+window.addEventListener("online", updateLive);
+window.addEventListener("offline", updateLive);
 
 /* =====================================================================
    plans · cart · checkout
@@ -516,7 +541,10 @@ function render() {
         ${c.khasra ? `<span><b>Khasra:</b> ${esc(c.khasra)}</span>` : ""}
       </div>
       ${c.notes ? `<p class="muted" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
+      ${(c.hearingHistory || []).length ? `<p class="muted small" style="margin:6px 0 0"><b>Previous dates:</b> ${
+        c.hearingHistory.slice(-5).map((h) => esc(fmtDate(h.date)) + (h.note ? ` (${esc(h.note)})` : "")).join(" · ")}</p>` : ""}
       <div class="case-actions">
+        ${disposed ? "" : `<button class="btn sm gold" data-next="${esc(c.id)}" type="button">📅 Next date</button>`}
         <button class="btn sm" data-edit="${esc(c.id)}" type="button">✏️ Edit</button>
         <button class="btn sm danger" data-del="${esc(c.id)}" type="button">🗑 Delete</button>
         ${docs}
@@ -532,7 +560,9 @@ function onListClick(e) {
   const edit = e.target.closest("[data-edit]");
   const del = e.target.closest("[data-del]");
   const open = e.target.closest("[data-open]");
-  if (open) { downloadDoc(open.dataset.open, open.dataset.file); return; }
+  const nxt = e.target.closest("[data-next]");
+  if (open) { openPreview(open.dataset.open, open.dataset.file); return; }
+  if (nxt) { openDateModal(cases.find((c) => c.id === nxt.dataset.next)); return; }
   if (edit) openCaseModal(cases.find((c) => c.id === edit.dataset.edit));
   if (del) deleteCase(cases.find((c) => c.id === del.dataset.del));
 }
@@ -574,30 +604,134 @@ async function removeFileChunks(caseId, d) {
     deleteDoc(doc(db, "cases", caseId, "chunks", `${d.id}_${i}`)).catch(() => {})));
 }
 
-async function downloadDoc(caseId, fileId) {
+const blobCache = new Map();
+async function loadDocBlob(caseId, d) {
+  const key = caseId + "_" + d.id;
+  if (blobCache.has(key)) return blobCache.get(key);
+  const snaps = await withTimeout(
+    Promise.all(Array.from({ length: d.chunks }, (_, i) => getDoc(doc(db, "cases", caseId, "chunks", `${d.id}_${i}`)))),
+    40000, "Timed out while loading the document."
+  );
+  const b64 = snaps.map((s) => s.data().data).join("");
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blob = new Blob([bytes], { type: d.type || "application/octet-stream" });
+  if (blobCache.size > 4) blobCache.delete(blobCache.keys().next().value);
+  blobCache.set(key, blob);
+  return blob;
+}
+
+function triggerDownload(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+async function ensurePdfJs() {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = PDFJS + "pdf.min.js";
+    sc.onload = resolve;
+    sc.onerror = () => reject(new Error("PDF viewer could not be loaded"));
+    document.head.appendChild(sc);
+  });
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + "pdf.worker.min.js";
+  return window.pdfjsLib;
+}
+
+async function renderPdfPages(container, blob, token) {
+  const lib = await ensurePdfJs();
+  const pdf = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
+  const maxPages = Math.min(pdf.numPages, 40);
+  const width = Math.max(240, container.clientWidth - 6);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  container.innerHTML = "";
+  for (let n = 1; n <= maxPages; n++) {
+    if (container._tok !== token) return;
+    const page = await pdf.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: (width / base.width) * dpr });
+    const canvas = document.createElement("canvas");
+    canvas.className = "pv-page";
+    canvas.width = vp.width; canvas.height = vp.height;
+    canvas.style.width = width + "px";
+    canvas.style.height = vp.height / dpr + "px";
+    container.appendChild(canvas);
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+  }
+  if (pdf.numPages > maxPages) {
+    const note = document.createElement("p");
+    note.className = "muted center";
+    note.textContent = `Showing first ${maxPages} of ${pdf.numPages} pages. Download to see all.`;
+    container.appendChild(note);
+  }
+}
+
+// Draws a preview of document `d` of case `caseId` into `container`
+async function renderPreview(container, caseId, d) {
+  const token = Symbol();
+  container._tok = token;
+  container.innerHTML = `<div class="pv-loading"><span class="spin"></span> Loading preview…</div>`;
+  try {
+    const blob = await loadDocBlob(caseId, d);
+    if (container._tok !== token) return blob;
+    const type = (d.type || "").toLowerCase();
+    const name = (d.name || "").toLowerCase();
+    if (type.startsWith("image/")) {
+      container.innerHTML = "";
+      const img = document.createElement("img");
+      img.className = "pv-img";
+      img.alt = d.name;
+      img.src = URL.createObjectURL(blob);
+      container.appendChild(img);
+    } else if (type === "application/pdf" || name.endsWith(".pdf")) {
+      try {
+        await renderPdfPages(container, blob, token);
+      } catch (pdfErr) {
+        console.warn("pdf.js failed, falling back to the browser viewer", pdfErr);
+        container.innerHTML = "";
+        const fr = document.createElement("iframe");
+        fr.className = "pv-frame";
+        fr.src = URL.createObjectURL(blob);
+        container.appendChild(fr);
+      }
+    } else if (type.startsWith("text/") || name.endsWith(".txt")) {
+      container.innerHTML = "";
+      const pre = document.createElement("pre");
+      pre.className = "pv-text";
+      pre.textContent = (await blob.text()).slice(0, 30000);
+      container.appendChild(pre);
+    } else {
+      container.innerHTML = `<div class="pv-loading">Preview is not available for this file type.<br/>Use <b>Download</b> to open it.</div>`;
+    }
+    return blob;
+  } catch (err) {
+    console.error(err);
+    if (container._tok === token) container.innerHTML = `<p class="error">Could not load the preview: ${esc(err.message || err)}</p>`;
+  }
+}
+
+let previewCurrent = null;
+async function openPreview(caseId, fileId) {
   const c = cases.find((x) => x.id === caseId);
   const d = (c?.documents || []).find((x) => x.id === fileId);
   if (!d) return;
-  toast(`Preparing ${d.name}…`);
-  try {
-    const snaps = await withTimeout(
-      Promise.all(Array.from({ length: d.chunks }, (_, i) => getDoc(doc(db, "cases", caseId, "chunks", `${d.id}_${i}`)))),
-      40000, "Timed out while loading the document."
-    );
-    const b64 = snaps.map((s) => s.data().data).join("");
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([bytes], { type: d.type }));
-    const a = document.createElement("a");
-    a.href = url; a.download = d.name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } catch (err) {
-    console.error(err);
-    toast("Could not open the document: " + (err.message || err), 5000);
-  }
+  previewCurrent = { caseId, d };
+  $("previewTitle").textContent = d.name;
+  $("previewModal").classList.remove("hidden");
+  await renderPreview($("previewBody"), caseId, d);
 }
+$("closePreview").onclick = () => { $("previewModal").classList.add("hidden"); $("previewBody").innerHTML = ""; previewCurrent = null; };
+$("previewDownload").onclick = async () => {
+  if (!previewCurrent) return;
+  try { triggerDownload(await loadDocBlob(previewCurrent.caseId, previewCurrent.d), previewCurrent.d.name); }
+  catch (err) { toast("Could not download: " + (err.message || err), 5000); }
+};
 
 /* =====================================================================
    case modal
@@ -702,6 +836,7 @@ form.addEventListener("submit", async (e) => {
     }
 
     let uploadWarning = "";
+    let uploadedItems = [];
     if (files.length) {
       $("uploadProgress").classList.remove("hidden");
       const uploaded = [];
@@ -719,6 +854,7 @@ form.addEventListener("submit", async (e) => {
           " You can open the case with Edit and attach it again.";
       }
       if (uploaded.length) {
+        uploadedItems = uploaded;
         await updateDoc(doc(db, "cases", caseId), { documents: [...keptDocs, ...uploaded], updatedAt: serverTimestamp() });
       }
     }
@@ -727,7 +863,7 @@ form.addEventListener("submit", async (e) => {
 
     const wasEdit = !!editing;
     closeCaseModal();
-    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", savedNumber, uploadWarning);
+    showSuccess(wasEdit ? "Case updated successfully" : "Case saved successfully", savedNumber, uploadWarning, caseId, uploadedItems);
   } catch (err) {
     console.error(err);
     $("caseError").textContent = "Save failed: " + (err.message || err);
@@ -737,15 +873,71 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-function showSuccess(title, caseNumber, warning = "") {
+let successDocs = { caseId: "", items: [] };
+function showSuccess(title, caseNumber, warning = "", caseId = "", uploaded = []) {
   $("successTitle").textContent = title;
   $("successCaseNo").textContent = caseNumber || "";
   $("successWarn").textContent = warning;
   $("successWarn").classList.toggle("hidden", !warning);
+  successDocs = { caseId, items: uploaded };
+  const has = uploaded.length > 0;
+  $("successBox").classList.toggle("wide", has);
+  $("successDocsWrap").classList.toggle("hidden", !has);
+  $("successDocList").innerHTML = uploaded.map((d, i) =>
+    `<button class="doc-chip" type="button" data-sprev="${i}">👁 ${esc(d.name)}</button>`).join("");
+  $("successPreview").innerHTML = "";
   $("successModal").classList.remove("hidden");
+  if (has) renderPreview($("successPreview"), caseId, uploaded[0]);   // show the first uploaded document right away
 }
-$("successOk").onclick = () => $("successModal").classList.add("hidden");
-$("successAdd").onclick = () => { $("successModal").classList.add("hidden"); openCaseModal(null); };
+$("successDocList").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-sprev]");
+  if (b) renderPreview($("successPreview"), successDocs.caseId, successDocs.items[Number(b.dataset.sprev)]);
+});
+$("successOk").onclick = () => { $("successModal").classList.add("hidden"); $("successPreview").innerHTML = ""; };
+$("successAdd").onclick = () => { $("successModal").classList.add("hidden"); $("successPreview").innerHTML = ""; openCaseModal(null); };
+
+/* ---------- quick "next hearing date" update ---------- */
+let dateCase = null;
+function openDateModal(c) {
+  if (!c) return;
+  dateCase = c;
+  $("dateCaseInfo").textContent = `${c.caseNumber} · ${c.appellant} vs ${c.respondent}` +
+    (c.nextHearing ? ` · Current date: ${fmtDate(c.nextHearing)}` : " · No date set yet");
+  $("newHearingDate").value = "";
+  $("hearingNote").value = "";
+  $("dateError").textContent = "";
+  $("dateModal").classList.remove("hidden");
+}
+const closeDateModal = () => { $("dateModal").classList.add("hidden"); dateCase = null; };
+$("closeDateModal").onclick = closeDateModal;
+$("cancelDate").onclick = closeDateModal;
+$("dateModal").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-plus]");
+  if (!b || !dateCase) return;
+  const base = dateCase.nextHearing || todayISO();
+  $("newHearingDate").value = addDaysISO(base, Number(b.dataset.plus));
+});
+$("saveDate").onclick = async () => {
+  if (!dateCase) return;
+  const val = $("newHearingDate").value;
+  const note = $("hearingNote").value.trim();
+  if (!val) { $("dateError").textContent = "Please choose the new hearing date."; return; }
+  if (val === dateCase.nextHearing) { $("dateError").textContent = "This is already the current hearing date."; return; }
+  $("saveDate").disabled = true;
+  try {
+    const history = [...(dateCase.hearingHistory || [])];
+    if (dateCase.nextHearing) history.push({ date: dateCase.nextHearing, note, on: todayISO() });
+    await withTimeout(updateDoc(doc(db, "cases", dateCase.id), {
+      nextHearing: val, hearingHistory: history, updatedAt: serverTimestamp()
+    }), 20000, "Saving timed out. Check your internet connection.");
+    closeDateModal();
+    toast(`✔ Next hearing date set: ${fmtDate(val)}`);
+  } catch (err) {
+    $("dateError").textContent = "Could not save: " + (err.message || err);
+  } finally {
+    $("saveDate").disabled = false;
+  }
+};
 
 async function deleteCase(c) {
   if (!c) return;
@@ -866,6 +1058,8 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("caseModal").classList.contains("hidden")) closeCaseModal();
   if (!$("reportModal").classList.contains("hidden")) closeReport();
+  if (!$("dateModal").classList.contains("hidden")) closeDateModal();
+  if (!$("previewModal").classList.contains("hidden")) $("closePreview").click();
 });
 
 // Installable app (PWA / APK wrapper)
