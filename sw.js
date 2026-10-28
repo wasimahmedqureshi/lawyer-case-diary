@@ -1,6 +1,6 @@
 // Minimal service worker: lets the app install (PWA / APK) and open its shell offline.
 // Network-first, so users always get the latest files when online.
-const CACHE = "lawyer-case-diary-v3";
+const CACHE = "lawyer-case-diary-v4";
 const SHELL = [
   "./", "index.html", "css/style.css", "js/app.js", "js/config.js",
   "js/firebase-config.js", "manifest.json", "icons/icon-192.png", "icons/icon-512.png"
