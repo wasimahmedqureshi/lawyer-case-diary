@@ -510,7 +510,7 @@ function render() {
     if (status !== "all" && (c.status || "Pending") !== status) return false;
     if (!term) return true;
     const hay = [c.caseNumber, c.appellant, c.respondent, c.clientName, c.section, c.caseType, c.courtName,
-      c.division, c.district, c.tehsil, c.village, c.khasra, c.notes].join(" ").toLowerCase();
+      c.division, c.district, c.tehsil, c.village, c.khasra, c.notes, c.clientPhone].join(" ").toLowerCase();
     return hay.includes(term);
   });
 
@@ -543,6 +543,7 @@ function render() {
       ${c.notes ? `<p class="muted" style="margin:8px 0 0">${esc(c.notes)}</p>` : ""}
       ${(c.hearingHistory || []).length ? `<p class="muted small" style="margin:6px 0 0"><b>Previous dates:</b> ${
         c.hearingHistory.slice(-5).map((h) => esc(fmtDate(h.date)) + (h.note ? ` (${esc(h.note)})` : "")).join(" · ")}</p>` : ""}
+      ${miniRow(c)}
       <div class="case-actions">
         ${disposed ? "" : `<button class="btn sm gold" data-next="${esc(c.id)}" type="button">📅 Next date</button>`}
         <button class="btn sm" data-edit="${esc(c.id)}" type="button">✏️ Edit</button>
@@ -551,6 +552,8 @@ function render() {
       </div>
     </article>`;
   }).join("");
+  renderBanner(pending, today);
+  refreshViews();
 }
 
 $("searchInput").addEventListener("input", render);
@@ -561,6 +564,8 @@ function onListClick(e) {
   const del = e.target.closest("[data-del]");
   const open = e.target.closest("[data-open]");
   const nxt = e.target.closest("[data-next]");
+  const sh = e.target.closest("[data-share]");
+  if (sh) { const c = cases.find((x) => x.id === sh.dataset.share); if (c) openWhatsApp(phoneDigits(c.clientPhone), caseShareText(c)); return; }
   if (open) { openPreview(open.dataset.open, open.dataset.file); return; }
   if (nxt) { openDateModal(cases.find((c) => c.id === nxt.dataset.next)); return; }
   if (edit) openCaseModal(cases.find((c) => c.id === edit.dataset.edit));
@@ -738,7 +743,8 @@ $("previewDownload").onclick = async () => {
    ===================================================================== */
 const form = $("caseForm");
 const FIELDS = ["clientName", "appellant", "respondent", "caseType", "section", "courtName", "division",
-  "district", "tehsil", "village", "khasra", "nextHearing", "status", "disposalDate", "notes"];
+  "district", "tehsil", "village", "khasra", "nextHearing", "status", "disposalDate", "notes",
+  "clientPhone", "totalFee", "feeReceived"];
 
 function toggleDisposal() {
   $("disposalWrap").classList.toggle("hidden", form.status.value !== "Disposed");
@@ -811,6 +817,8 @@ form.addEventListener("submit", async (e) => {
 
   const data = {};
   FIELDS.forEach((f) => { data[f] = (form[f].value || "").trim(); });
+  data.totalFee = Math.max(0, Number(data.totalFee) || 0);
+  data.feeReceived = Math.max(0, Number(data.feeReceived) || 0);
   if (data.status !== "Disposed") data.disposalDate = "";
   if (data.status === "Disposed" && !data.disposalDate) {
     $("caseError").textContent = "Please enter the disposal date."; return;
@@ -1049,6 +1057,315 @@ $("makePdf").onclick = () => {
       cleanup();
     }
   }, 400);
+};
+
+/* =====================================================================
+   v3 features: today banner · calendar · insights · WhatsApp · export · dark mode
+   ===================================================================== */
+const phoneDigits = (p) => {
+  let d = String(p || "").replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("0")) d = d.slice(1);
+  if (d.length === 10) d = "91" + d;
+  return d.length >= 11 ? d : "";
+};
+const feeBalance = (c) => Math.max(0, (Number(c.totalFee) || 0) - (Number(c.feeReceived) || 0));
+const localISO = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
+const isPending = (c) => c.status !== "Disposed";
+
+function openWhatsApp(phone, text) {
+  const base = phone ? `https://wa.me/${phone}` : "https://wa.me/";
+  window.open(`${base}?text=${encodeURIComponent(text)}`, "_blank", "noopener");
+}
+function caseShareText(c) {
+  return [
+    "⚖️ *Case update*",
+    `Case No.: ${c.caseNumber}`,
+    `${c.appellant} vs ${c.respondent}`,
+    `Court: ${c.courtName}`,
+    `Type / Section: ${c.caseType} · ${c.section}`,
+    c.status === "Disposed" ? `Status: Disposed on ${fmtDate(c.disposalDate)}` : (c.nextHearing ? `Next hearing: ${fmtDate(c.nextHearing)}` : "Next hearing: will be informed"),
+    `— ${advocate.name}`
+  ].join("\n");
+}
+function dayListText(iso) {
+  const list = cases.filter((c) => isPending(c) && c.nextHearing === iso);
+  return [`⚖️ *Hearings on ${fmtDate(iso)}* (${list.length})`, "",
+    ...list.map((c, i) => `${i + 1}. ${c.caseNumber} — ${c.appellant} vs ${c.respondent}\n    ${c.courtName}`),
+    "", `— ${advocate.name}`].join("\n");
+}
+
+function miniRow(c) {
+  const ph = phoneDigits(c.clientPhone);
+  const bits = [];
+  if (ph) bits.push(`<a class="mini-btn call" href="tel:+${esc(ph)}">📞 Call</a>`);
+  bits.push(ph
+    ? `<button class="mini-btn wa" type="button" data-share="${esc(c.id)}">💬 WhatsApp client</button>`
+    : `<button class="mini-btn" type="button" data-share="${esc(c.id)}">📤 Share</button>`);
+  const total = Number(c.totalFee) || 0;
+  if (total > 0) {
+    const bal = feeBalance(c);
+    bits.push(bal > 0
+      ? `<span class="fee-chip">Fee ${money(total)} · Received ${money(Number(c.feeReceived) || 0)} · Balance ${money(bal)}</span>`
+      : `<span class="fee-chip clear">Fee ${money(total)} received in full ✓</span>`);
+  }
+  return `<div class="mini-row">${bits.join("")}</div>`;
+}
+
+/* ---------- today banner ---------- */
+function renderBanner(pending, today) {
+  const hour = new Date().getHours();
+  const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const tomorrow = addDaysISO(today, 1);
+  const tdy = pending.filter((c) => c.nextHearing === today);
+  const tmr = pending.filter((c) => c.nextHearing === tomorrow);
+  const late = pending.filter((c) => c.nextHearing && c.nextHearing < today).length;
+  const bal = cases.reduce((a, c) => a + feeBalance(c), 0);
+  $("todayBanner").innerHTML = `
+    <div style="z-index:1">
+      <h2>नमस्ते, ${esc(advocate.name || "Advocate")} 👋</h2>
+      <div class="hdate">${esc(greet)} · ${esc(fmtLongDate(today))}</div>
+      <div class="hero-nums">
+        <div class="hero-num gold"><b>${tdy.length}</b><span>Hearings today</span></div>
+        <div class="hero-num"><b>${tmr.length}</b><span>Tomorrow</span></div>
+        ${late ? `<div class="hero-num"><b>${late}</b><span>Dates passed</span></div>` : ""}
+        ${bal ? `<div class="hero-num"><b>${money(bal)}</b><span>Fees pending</span></div>` : ""}
+      </div>
+      ${tdy.length ? `<ul class="hero-lines">${tdy.slice(0, 3).map((c) => `<li>• ${esc(c.appellant)} vs ${esc(c.respondent)} · ${esc(c.courtName)}</li>`).join("")}${tdy.length > 3 ? `<li>+ ${tdy.length - 3} more</li>` : ""}</ul>` : `<ul class="hero-lines"><li>No hearings today — a calm day ☕</li></ul>`}
+    </div>
+    <div class="hero-actions">
+      ${tdy.length ? `<button class="btn gold" type="button" data-hero="today">📤 Share today's list</button>` : ""}
+      ${tmr.length ? `<button class="btn" type="button" data-hero="tomorrow">📤 Share tomorrow's list</button>` : ""}
+      <button class="btn" type="button" data-hero="cal">📆 Open calendar</button>
+    </div>`;
+}
+$("todayBanner").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-hero]");
+  if (!b) return;
+  const t = todayISO();
+  if (b.dataset.hero === "today") openWhatsApp("", dayListText(t));
+  if (b.dataset.hero === "tomorrow") openWhatsApp("", dayListText(addDaysISO(t, 1)));
+  if (b.dataset.hero === "cal") { calMonth = new Date(); calMonth.setDate(1); calSel = t; setView("calendar"); }
+});
+
+/* ---------- tabs ---------- */
+let currentView = "cases";
+function setView(v) {
+  currentView = v;
+  document.querySelectorAll(".vtab").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
+  $("viewCases").classList.toggle("hidden", v !== "cases");
+  $("viewCalendar").classList.toggle("hidden", v !== "calendar");
+  $("viewInsights").classList.toggle("hidden", v !== "insights");
+  refreshViews();
+}
+function refreshViews() {
+  if (currentView === "calendar") renderCalendar();
+  if (currentView === "insights") renderInsights();
+}
+$("viewTabs").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-view]");
+  if (b) setView(b.dataset.view);
+});
+
+/* ---------- calendar ---------- */
+let calMonth = new Date(); calMonth.setDate(1);
+let calSel = null;
+function renderCalendar() {
+  const today = todayISO();
+  if (!calSel) calSel = today;
+  const y = calMonth.getFullYear(), m = calMonth.getMonth();
+  const offset = new Date(y, m, 1).getDay();                      // Sunday first
+  const byDate = {};
+  cases.filter((c) => isPending(c) && c.nextHearing).forEach((c) => (byDate[c.nextHearing] ||= []).push(c));
+
+  let cells = "";
+  const rows = (offset + new Date(y, m + 1, 0).getDate()) > 35 ? 42 : 35;
+  for (let i = 0; i < rows; i++) {
+    const d = new Date(y, m, 1 - offset + i);
+    const iso = localISO(d);
+    const n = (byDate[iso] || []).length;
+    cells += `<button type="button" data-day="${iso}" class="cal-cell ${d.getMonth() !== m ? "other" : ""} ${d.getDay() === 0 ? "sun" : ""} ${iso === today ? "today" : ""} ${iso === calSel ? "sel" : ""}">
+      <span class="d">${d.getDate()}</span>
+      ${n ? `<span class="cnt ${iso < today ? "late" : n >= 3 ? "many" : ""}">${n}</span>` : ""}
+    </button>`;
+  }
+  const dayList = byDate[calSel] || [];
+  $("viewCalendar").innerHTML = `
+    <div class="cal-wrap">
+      <div class="cal">
+        <div class="cal-head">
+          <h3>${esc(calMonth.toLocaleDateString("en-IN", { month: "long", year: "numeric" }))}</h3>
+          <div class="cal-nav">
+            <button class="btn sm" type="button" data-calnav="prev" aria-label="Previous month">‹</button>
+            <button class="btn sm" type="button" data-calnav="today">Today</button>
+            <button class="btn sm" type="button" data-calnav="next" aria-label="Next month">›</button>
+          </div>
+        </div>
+        <div class="cal-grid">
+          ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((w) => `<div class="cal-dow">${w}</div>`).join("")}
+          ${cells}
+        </div>
+        <div class="cal-legend">
+          <span><i style="background:var(--s1)"></i>Hearings</span>
+          <span><i style="background:var(--s2)"></i>3 or more</span>
+          <span><i style="background:var(--danger)"></i>Date passed (pending)</span>
+        </div>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">${esc(fmtLongDate(calSel))}</h3>
+        <p class="muted small" style="margin:-4px 0 6px">${dayList.length ? `${dayList.length} hearing${dayList.length > 1 ? "s" : ""}` : "No hearings on this day."}</p>
+        ${dayList.map((c) => `
+          <div class="day-case">
+            <div class="t">${esc(c.appellant)} vs ${esc(c.respondent)}</div>
+            <div class="s">${esc(c.caseNumber)} · ${esc(c.courtName)}</div>
+            <div class="mini-row">
+              <button class="mini-btn" type="button" data-next="${esc(c.id)}">📅 Next date</button>
+              <button class="mini-btn" type="button" data-edit="${esc(c.id)}">✏️ Edit</button>
+              <button class="mini-btn wa" type="button" data-share="${esc(c.id)}">💬 Share</button>
+            </div>
+          </div>`).join("")}
+        ${dayList.length ? `<button class="btn sm block" type="button" data-shareday="${esc(calSel)}">📤 Share this day's list on WhatsApp</button>` : ""}
+      </div>
+    </div>`;
+}
+$("viewCalendar").addEventListener("click", (e) => {
+  const day = e.target.closest("[data-day]");
+  const nav = e.target.closest("[data-calnav]");
+  const sd = e.target.closest("[data-shareday]");
+  if (day) { calSel = day.dataset.day; renderCalendar(); return; }
+  if (sd) { openWhatsApp("", dayListText(sd.dataset.shareday)); return; }
+  if (nav) {
+    if (nav.dataset.calnav === "today") { calMonth = new Date(); calMonth.setDate(1); calSel = todayISO(); }
+    else calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + (nav.dataset.calnav === "next" ? 1 : -1), 1);
+    renderCalendar();
+    return;
+  }
+  onListClick(e);
+});
+
+/* ---------- insights (charts) ---------- */
+function tally(list, keyFn) {
+  const m = new Map();
+  list.forEach((c) => { const k = (keyFn(c) || "—").toString().trim() || "—"; m.set(k, (m.get(k) || 0) + 1); });
+  return [...m.entries()].sort((a, b) => b[1] - a[1]);
+}
+function donutSvg(items, total) {
+  const R = 62, C = 2 * Math.PI * R;
+  let acc = 0;
+  const segs = items.map((it, i) => {
+    const len = (it.n / total) * C;
+    const dash = Math.max(len - (items.length > 1 ? 2.5 : 0), 0.6);
+    const el = `<circle class="seg" cx="84" cy="84" r="${R}" fill="none" stroke="${it.color}" stroke-width="24"
+      stroke-dasharray="${dash} ${C}" stroke-dashoffset="${-acc}" transform="rotate(-90 84 84)"><title>${esc(it.label)}: ${it.n} (${Math.round(it.n / total * 100)}%)</title></circle>`;
+    acc += len;
+    return el;
+  }).join("");
+  return `<svg class="donut" viewBox="0 0 168 168" role="img" aria-label="Cases by type">
+    ${segs}
+    <text x="84" y="82" text-anchor="middle" font-size="26" font-weight="800">${total}</text>
+    <text x="84" y="100" text-anchor="middle" font-size="10" style="fill:var(--muted)">cases</text>
+  </svg>`;
+}
+function vbars(vals, labels) {
+  const max = Math.max(1, ...vals);
+  return `<div class="vbars">${vals.map((v, i) => `
+      <div class="vbar" title="${esc(labels[i])}: ${v}">
+        <span class="val">${v}</span><div class="bar" style="height:${Math.max(2, Math.round(v / max * 78))}%"></div>
+      </div>`).join("")}</div>
+    <div class="vlabels">${labels.map((l) => `<span>${esc(l)}</span>`).join("")}</div>`;
+}
+function renderInsights() {
+  const box = $("viewInsights");
+  if (!cases.length) {
+    box.innerHTML = `<div class="empty"><div class="empty-ic">📊</div><h3>No data yet</h3><p class="muted">Add a few cases and your charts will appear here.</p></div>`;
+    return;
+  }
+  const total = cases.length;
+  const disposed = cases.filter((c) => !isPending(c)).length;
+  const pend = total - disposed;
+  const rate = Math.round(disposed / total * 100);
+  const feeTotal = cases.reduce((a, c) => a + (Number(c.totalFee) || 0), 0);
+  const feeGot = cases.reduce((a, c) => a + Math.min(Number(c.feeReceived) || 0, Number(c.totalFee) || 0), 0);
+  const feeBal = feeTotal - feeGot;
+  const feePct = feeTotal ? Math.round(feeGot / feeTotal * 100) : 0;
+
+  // by case type: top 5 + Other
+  const types = tally(cases, (c) => c.caseType);
+  const colors = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)"];
+  const items = types.slice(0, 5).map(([label, n], i) => ({ label, n, color: colors[i] }));
+  const rest = types.slice(5).reduce((a, [, n]) => a + n, 0);
+  if (rest) items.push({ label: "Other", n: rest, color: "var(--sx)" });
+
+  // registered per month (last 6)
+  const now = new Date();
+  const months = Array.from({ length: 6 }, (_, i) => new Date(now.getFullYear(), now.getMonth() - 5 + i, 1));
+  const perMonth = months.map((m) => cases.filter((c) => {
+    const t = new Date(c.createdAt?.toMillis?.() ?? Date.now());
+    return t.getFullYear() === m.getFullYear() && t.getMonth() === m.getMonth();
+  }).length);
+
+  // workload: next 4 weeks
+  const today = todayISO();
+  const weeks = [0, 1, 2, 3].map((k) => {
+    const from = addDaysISO(today, k * 7), to = addDaysISO(today, k * 7 + 6);
+    return cases.filter((c) => isPending(c) && c.nextHearing >= from && c.nextHearing <= to).length;
+  });
+  const weekLabels = [0, 1, 2, 3].map((k) => k === 0 ? "This week" : `+${k} wk`);
+
+  const courts = tally(cases, (c) => c.courtName).slice(0, 5);
+  const cmax = courts[0] ? courts[0][1] : 1;
+
+  box.innerHTML = `
+    <div class="ins-kpis">
+      <div class="kpi"><div class="k">Disposal rate</div><div class="v">${rate}%</div><div class="sub">${disposed} disposed · ${pend} pending</div><div class="meter"><div style="width:${rate}%"></div></div></div>
+      <div class="kpi"><div class="k">Total fee agreed</div><div class="v">${money(feeTotal)}</div><div class="sub">across ${cases.filter((c) => Number(c.totalFee) > 0).length} cases</div></div>
+      <div class="kpi"><div class="k">Fee received</div><div class="v">${money(feeGot)}</div><div class="sub">${feePct}% collected</div><div class="meter"><div style="width:${feePct}%"></div></div></div>
+      <div class="kpi"><div class="k">Fee balance</div><div class="v" style="color:${feeBal ? "var(--warn)" : "var(--ok)"}">${money(feeBal)}</div><div class="sub">${feeBal ? "still to collect" : "all clear"}</div></div>
+    </div>
+    <div class="ins-grid">
+      <div class="chart-card"><h3>Cases by type</h3><div class="cap">Share of all your cases</div>
+        <div class="donut-row">${donutSvg(items, total)}
+          <div class="legend">${items.map((it) => `<div><i style="background:${it.color}"></i><span>${esc(it.label)}</span><b>${it.n}</b><span class="p">${Math.round(it.n / total * 100)}%</span></div>`).join("")}</div>
+        </div></div>
+      <div class="chart-card"><h3>Upcoming workload</h3><div class="cap">Pending hearings in the next 4 weeks</div>${vbars(weeks, weekLabels)}</div>
+      <div class="chart-card"><h3>Cases registered</h3><div class="cap">Last 6 months</div>${vbars(perMonth, months.map((m) => m.toLocaleDateString("en-IN", { month: "short" })))}</div>
+      <div class="chart-card"><h3>Busiest courts</h3><div class="cap">Cases per court (top 5)</div>
+        <div class="hbars">${courts.map(([name, n]) => `<div class="hbar"><div class="row1"><span title="${esc(name)}">${esc(name)}</span><b>${n}</b></div><div class="track"><div class="fill" style="width:${Math.round(n / cmax * 100)}%"></div></div></div>`).join("")}</div></div>
+    </div>`;
+}
+
+/* ---------- export to Excel (CSV) ---------- */
+function csvCell(v) {
+  let t = String(v ?? "");
+  if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;                  // stop spreadsheet formula injection
+  return `"${t.replace(/"/g, '""')}"`;
+}
+$("exportBtn").onclick = () => {
+  if (!cases.length) { toast("No cases to export yet."); return; }
+  const head = ["Case No.", "Client", "Client mobile", "Appellant", "Respondent", "Case type", "Section", "Court", "Division",
+    "District", "Tehsil", "Village", "Khasra", "Status", "Next hearing", "Disposal date", "Total fee", "Fee received", "Fee balance", "Notes"];
+  const rows = [...cases].sort((a, b) => String(a.caseNumber).localeCompare(String(b.caseNumber))).map((c) => [
+    c.caseNumber, c.clientName, c.clientPhone, c.appellant, c.respondent, c.caseType, c.section, c.courtName, c.division,
+    c.district, c.tehsil, c.village, c.khasra, c.status || "Pending", fmtDate(c.nextHearing === "" ? "" : c.nextHearing).replace("—", ""),
+    fmtDate(c.disposalDate).replace("—", ""), c.totalFee || 0, c.feeReceived || 0, feeBalance(c), c.notes]);
+  const csv = "﻿" + [head, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n");
+  triggerDownload(new Blob([csv], { type: "text/csv;charset=utf-8" }), `Case-Diary_${todayISO()}.csv`);
+  toast(`✔ Exported ${cases.length} cases (opens in Excel)`);
+};
+
+/* ---------- dark mode ---------- */
+let theme = "light";
+try { theme = localStorage.getItem("lcd-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); } catch (_) {}
+function applyTheme(t) {
+  theme = t;
+  document.documentElement.setAttribute("data-theme", t);
+  $("themeBtn").textContent = t === "dark" ? "☀️" : "🌙";
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", t === "dark" ? "#0b1b30" : "#0f2742");
+}
+applyTheme(theme);
+$("themeBtn").onclick = () => {
+  applyTheme(theme === "dark" ? "light" : "dark");
+  try { localStorage.setItem("lcd-theme", theme); } catch (_) {}
+  refreshViews();
 };
 
 /* =====================================================================
