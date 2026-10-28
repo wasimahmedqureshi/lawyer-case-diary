@@ -97,6 +97,7 @@
     <header class="topbar">
       <div class="brand"><img src="icons/icon-192.png" alt="" width="30" height="30" /><span>Lawyer Case Diary</span></div>
       <div class="topbar-right">
+        <button id="themeBtn" class="icon-chip" type="button" title="Dark / light mode" aria-label="Toggle dark mode">🌙</button>
         <span id="liveDot" class="live connecting" title="Connecting to server…"><i></i><b>Connecting…</b></span>
         <button id="planPill" class="pill" type="button" title="View subscription"></button>
         <span id="advName" class="adv-name"></span>
@@ -111,10 +112,13 @@
           <p id="welcome" class="muted"></p>
         </div>
         <div class="head-actions">
+          <button id="exportBtn" class="btn" type="button">⬇ Export Excel</button>
           <button id="reportBtn" class="btn" type="button">🖨 Hearings report</button>
           <button id="addBtn" class="btn primary" type="button">＋ New case</button>
         </div>
       </div>
+
+      <section id="todayBanner" class="hero"></section>
 
       <section class="stats">
         <div class="stat"><div class="stat-ic">📁</div><div><div class="num" id="statTotal">0</div><div class="lbl">Total cases</div></div></div>
@@ -123,7 +127,16 @@
         <div class="stat"><div class="stat-ic green">✔</div><div><div class="num" id="statDisposed">0</div><div class="lbl">Disposed</div></div></div>
       </section>
 
-      <div class="layout">
+      <nav class="view-tabs" id="viewTabs">
+        <button class="vtab active" type="button" data-view="cases">🗂 Cases</button>
+        <button class="vtab" type="button" data-view="calendar">📆 Calendar</button>
+        <button class="vtab" type="button" data-view="insights">📊 Insights</button>
+      </nav>
+
+      <div id="viewCalendar" class="hidden"></div>
+      <div id="viewInsights" class="hidden"></div>
+
+      <div class="layout" id="viewCases">
         <div class="main-col">
           <section class="toolbar">
             <div class="search-wrap">
@@ -184,6 +197,9 @@
           </label>
           <label>Respondent name *
             <input name="respondent" type="text" required />
+          </label>
+          <label>Client mobile <span class="opt">(for call / WhatsApp)</span>
+            <input name="clientPhone" type="tel" inputmode="tel" placeholder="10-digit mobile" />
           </label>
         </div>
 
@@ -249,6 +265,16 @@
         <label>Notes / purpose of hearing
           <textarea name="notes" rows="3"></textarea>
         </label>
+
+        <h3>Fees <span class="opt" style="text-transform:none;letter-spacing:0">(optional)</span></h3>
+        <div class="grid">
+          <label>Total fee agreed (₹)
+            <input name="totalFee" type="number" min="0" step="1" inputmode="numeric" />
+          </label>
+          <label>Fee received so far (₹)
+            <input name="feeReceived" type="number" min="0" step="1" inputmode="numeric" />
+          </label>
+        </div>
 
         <h3>Documents</h3>
         <div id="existingDocs" class="doc-list"></div>
